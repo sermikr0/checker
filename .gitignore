@@ -2,12 +2,19 @@
 signing-key.pem
 admin_token.txt
 admin_user.json
+admin_user.json.tmp
 cloudflared.env
 ADMIN-CREDENTIALS.txt
+
+# Real company inventory (AD names, IPs) — keep it on the server only.
+# companies.example.json shows the format.
+companies.json
 
 # Database
 fleet.db
 fleet.db-journal
+fleet.db-wal
+fleet.db-shm
 
 # Build artifacts
 *.crx

@@ -1,0 +1,33 @@
+[
+  {
+    "name": "Example Logistics",
+    "domain": "example.local",
+    "dc_ip": "10.20.0.10",
+    "subnet": "10.20",
+    "nat_ips": [
+      "203.0.113.10"
+    ],
+    "computers": [
+      "DISPATCH-01",
+      "DISPATCH-02",
+      "ACCOUNTING-01",
+      "SAFETY-01"
+    ],
+    "notes": "Main office"
+  },
+  {
+    "name": "Sample Freight",
+    "domain": "sample.local",
+    "dc_ip": "10.30.0.10",
+    "subnet": "10.30.0.0/16",
+    "nat_ips": [],
+    "computers": [
+      "PC-101",
+      "PC-102"
+    ],
+    "policy_mode": "blacklist",
+    "blacklist": [
+      "web.whatsapp.com"
+    ]
+  }
+]

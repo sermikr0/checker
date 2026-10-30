@@ -1,71 +1,42 @@
-# Fleet auto-update — how it works (signed, legitimate)
+# Shipping a new extension version
 
-This gives you exactly the outcome you wanted — **publish once from the
-dashboard, every machine auto-updates** — using Chrome's own signed-update
-channel instead of pushing/executing code. Chrome verifies the package
-signature before installing; nothing runs arbitrary code at runtime.
+Chrome updates force-installed extensions from the fleet server's
+`update_manifest.xml`. Chrome verifies the package signature; the server checks
+that the package carries the fleet's extension ID before publishing it.
 
-Key facts:
-- **Extension ID:** `lddmakdihlenfbmdpggpahjooglgigoi` (fixed; comes from `signing-key.pem`)
-- **Update URL:** `http://10.252.13.126:8080/update_manifest.xml`
-- **Signing key:** `/home/ai/backup/url-fleet/signing-key.pem` — **guard it, back it up, reuse it for every version.** Lose it and the extension ID changes (fleet can't update).
+* **Extension ID:** `lddmakdihlenfbmdpggpahjooglgigoi` (fixed by `signing-key.pem`)
+* **Update URL:** `https://fleet.red1.uz/update_manifest.xml`
+* **Signing key:** `signing-key.pem` — keep an offline backup and reuse it for
+  every version. Lose it and the extension ID changes; the fleet can no longer update.
 
-## One-time: force-install the extension on each machine
+## One-time: force-install on each computer
 
-Self-hosted auto-update works only for **policy-installed** extensions (a
-"Load unpacked" copy never auto-updates). Deploy the policy once per machine
-(GPO/MDM for the whole fleet, or by hand for a test).
+Self-hosted updates only work for policy-installed extensions ("Load unpacked"
+never updates). The dashboard's **Updates** page shows ready-to-copy commands
+with the right ID and URL:
 
-**Windows** — registry (admin), then restart Chrome:
-```
-reg add "HKLM\Software\Policies\Google\Chrome\ExtensionInstallForcelist" /v 1 /t REG_SZ ^
- /d "lddmakdihlenfbmdpggpahjooglgigoi;http://10.252.13.126:8080/update_manifest.xml" /f
-```
+* **Windows** (admin, then restart Chrome):
+  ```
+  reg add "HKLM\Software\Policies\Google\Chrome\ExtensionInstallForcelist" /v 1 /t REG_SZ /d "lddmakdihlenfbmdpggpahjooglgigoi;https://fleet.red1.uz/update_manifest.xml" /f
+  ```
+* **Linux** — `/etc/opt/chrome/policies/managed/url-fleet.json`:
+  ```json
+  { "ExtensionInstallForcelist": ["lddmakdihlenfbmdpggpahjooglgigoi;https://fleet.red1.uz/update_manifest.xml"] }
+  ```
+* **Group Policy / Google Admin console** — force-install the ID above with the update URL above.
 
-**Linux** — create `/etc/opt/chrome/policies/managed/url-fleet.json`, restart Chrome:
-```json
-{ "ExtensionInstallForcelist":
-  ["lddmakdihlenfbmdpggpahjooglgigoi;http://10.252.13.126:8080/update_manifest.xml"] }
-```
+## Every release
 
-**macOS** — same key via a configuration profile / `com.google.Chrome` plist.
-
-**Google Admin console (managed Chrome):** Devices → Chrome → Apps & extensions
-→ add by ID `lddmakdihlenfbmdpggpahjooglgigoi`, Installation = *Force install*,
-"Install URL" = the update_url above.
-
-After the policy is applied, Chrome installs the extension automatically and
-then polls the update URL every few hours (or immediately on
-`chrome://extensions` → **Update**).
-
-## Every time you ship a new version
-
-1. Make your code changes in the extension folder.
-2. Bump `"version"` in `manifest.json` **and** `VERSION` in `analyzer.js`.
-3. Re-pack **with the same key**:
+1. Change the code in `extension/`.
+2. Raise `"version"` in `extension/manifest.json` **and** `VERSION` in `extension/analyzer.js`.
+3. Pack with the same key:
    ```bash
-   cd /home/ai/backup/url-fleet
-   python3 pack_crx.py extension signing-key.pem url-safety-checker-<NEW>.crx
+   python3 pack_crx.py extension signing-key.pem url-safety-checker-<version>.crx
    ```
-4. Dashboard → **Extension updates** → *Choose File* → the new `.crx` →
-   **Upload & publish**. (The server reads the version from the package and
-   updates `update_manifest.xml` automatically.)
-5. Done. Force-installed machines auto-update within hours; the device table
-   shows each machine's version so you watch the rollout.
+4. Dashboard → **Updates** → drop the `.crx` on the upload area.
+5. Browsers pick it up within a few hours (or at once from `chrome://extensions` → **Update**).
+   The Updates page shows how many browsers already run the new version.
 
-## Test it on one browser now
-
-1. Apply the force-install policy above on your machine, restart Chrome →
-   the extension installs itself from the server (v2.1.0) and appears in the
-   dashboard.
-2. Bump to 2.1.1, pack, Upload & publish.
-3. On `chrome://extensions` click **Update** → it jumps to 2.1.1 with no
-   reinstall. That is the whole fleet experience, on one machine.
-
-## Reminders
-- `signing-key.pem` is the crown jewel — without it you cannot ship updates
-  that the fleet will accept. Keep an offline backup.
-- Put the server behind **TLS** before leaving the trusted LAN; serve the
-  update URL and `.crx` over https then.
-- The extension still shows the compact "managed by your organization" line in
-  Settings — keep that; it is what keeps the deployment disclosed and legitimate.
+Publishing a version that is not newer than the current one asks for
+confirmation — Chrome never downgrades, so it would have no effect on
+browsers that already run the newer version.

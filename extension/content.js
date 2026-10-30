@@ -57,13 +57,13 @@
     tip.style.cssText = [
       'position:fixed', 'z-index:2147483647', 'pointer-events:none', 'display:none',
       'width:300px', 'max-width:calc(100vw - 24px)', 'box-sizing:border-box',
-      'background:#0f1222', 'color:#e5e7eb', 'border:1px solid #2b3150', 'border-radius:10px',
+      'background:#1c2226', 'color:#e5e7eb', 'border:1px solid #2b3338', 'border-radius:10px',
       'box-shadow:0 10px 30px rgba(0,0,0,.55)', 'font:12px/1.4 "Segoe UI",system-ui,sans-serif',
       'text-align:left', 'opacity:0', 'transition:opacity .12s ease',
     ].join(';');
 
     const head = document.createElement('div');
-    head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 12px 8px;border-bottom:1px solid #1f2440';
+    head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 12px 8px;border-bottom:1px solid #262e33';
     const icon = document.createElement('span');
     icon.style.cssText = 'font-size:18px;line-height:1';
     const meta = document.createElement('div');
@@ -71,14 +71,14 @@
     const label = document.createElement('div');
     label.style.cssText = 'font-weight:800;font-size:13px;letter-spacing:.4px';
     const host = document.createElement('div');
-    host.style.cssText = 'font-size:11px;color:#8b93b5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    host.style.cssText = 'font-size:11px;color:#98a5a0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     const score = document.createElement('div');
     score.style.cssText = 'font-size:17px;font-weight:900';
     meta.append(label, host);
     head.append(icon, meta, score);
 
     const barWrap = document.createElement('div');
-    barWrap.style.cssText = 'margin:0 12px 8px;height:4px;border-radius:3px;background:#1f2440;overflow:hidden';
+    barWrap.style.cssText = 'margin:0 12px 8px;height:4px;border-radius:3px;background:#262e33;overflow:hidden';
     const bar = document.createElement('div');
     bar.style.cssText = 'height:100%;border-radius:3px;width:0';
     barWrap.appendChild(bar);
@@ -87,7 +87,7 @@
     list.style.cssText = 'padding:6px 12px 8px;max-height:132px;overflow:hidden';
 
     const foot = document.createElement('div');
-    foot.style.cssText = 'padding:5px 12px 7px;font-size:10px;color:#4b5280;border-top:1px solid #1f2440';
+    foot.style.cssText = 'padding:5px 12px 7px;font-size:10px;color:#6f7a80;border-top:1px solid #262e33';
     foot.textContent = 'URL Safety Checker · static preview';
 
     tip.append(head, barWrap, list, foot);
@@ -122,13 +122,13 @@
     } else {
       issues.slice(0, 5).forEach((issue) => {
         const row = document.createElement('div');
-        row.style.cssText = 'padding:3px 0;border-bottom:1px solid #1a1e36;font-size:11px;color:' + (issue.t === 'd' ? '#fca5a5' : issue.t === 'ok' ? '#86efac' : '#c7cce6');
+        row.style.cssText = 'padding:3px 0;border-bottom:1px solid #262e33;font-size:11px;color:' + (issue.t === 'd' ? '#fca5a5' : issue.t === 'ok' ? '#86efac' : '#d5dcd8');
         row.textContent = (issue.t === 'd' ? '• ' : issue.t === 'ok' ? '✓ ' : '• ') + issue.m;
         tipParts.list.appendChild(row);
       });
       if (issues.length > 5) {
         const more = document.createElement('div');
-        more.style.cssText = 'padding-top:4px;font-size:11px;color:#8b93b5';
+        more.style.cssText = 'padding-top:4px;font-size:11px;color:#98a5a0';
         more.textContent = `+${issues.length - 5} more — right-click the link › Check link safety`;
         tipParts.list.appendChild(more);
       }

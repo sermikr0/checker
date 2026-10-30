@@ -6,7 +6,7 @@ trucking companies: fake DAT / Truckstop / Highway logins, "renew your USDOT
 registration" fraud, rate-confirmation and BOL attachments that are really
 malware, carrier-packet lures, and "we changed our bank account" invoice fraud.
 
-Version 2.0.0 · Manifest V3 · no build step, no dependencies.
+Version 2.3.0, Manifest V3, no build step, no dependencies.
 
 ## Install (unpacked)
 
@@ -137,6 +137,18 @@ folder) runs the verdict suite against `analyzer.js`.
   cannot be scanned.
 - Scores are heuristics. A Caution on your own partner's new domain is normal;
   add it to the allowlist.
+
+## Changes in 2.3.0
+
+- New look shared with the fleet dashboard: the verdict is shown as a road-sign
+  plate, domains in a monospace face so look-alikes stand out, light and dark
+  theme follow the system.
+- History tab is back (last 50 checks, stored only in this browser).
+- Settings show which company manages the browser and its web-filtering mode.
+- The block page names the company and the rule that blocked the site, and
+  tells the user when an access request could not be sent.
+- The server now sends each browser its company's policy; nothing changes in
+  what the extension sends (device ID, version, user-agent).
 
 ## Changes in 2.0.1
 
