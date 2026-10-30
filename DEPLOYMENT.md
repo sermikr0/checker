@@ -11,6 +11,7 @@ The server is one Python file plus the `web/` folder. It needs no packages.
   app/
     server.py
     web/                   # dashboard
+    blocklists/            # built-in phishing lists (*.txt)
     fleet.db               # created on first start
     admin_user.json        # created on first start (hashed password)
     downloads/             # published .crx files

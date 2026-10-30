@@ -55,6 +55,8 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("FLEET_DATA_DIR", HERE)
 WEB_DIR = os.path.join(HERE, "web")
+# Built-in phishing blocklists (*.txt, one domain per line, # comments). Blocked in every mode.
+BLOCKLIST_DIR = os.environ.get("FLEET_BLOCKLIST_DIR", os.path.join(HERE, "blocklists"))
 DB_PATH = os.path.join(DATA_DIR, "fleet.db")
 USER_PATH = os.path.join(DATA_DIR, "admin_user.json")
 LEGACY_TOKEN_PATH = os.path.join(DATA_DIR, "admin_token.txt")
@@ -750,10 +752,54 @@ def company_row_to_dict(r):
     return d
 
 
+_threats = {"sig": None, "domains": [], "files": []}
+_threats_lock = threading.Lock()
+
+
+def threats_signature():
+    try:
+        names = sorted(f for f in os.listdir(BLOCKLIST_DIR) if f.endswith(".txt"))
+    except OSError:
+        return ()
+    sig = []
+    for f in names:
+        try:
+            st = os.stat(os.path.join(BLOCKLIST_DIR, f))
+            sig.append((f, st.st_mtime_ns, st.st_size))
+        except OSError:
+            pass
+    return tuple(sig)
+
+
+def load_threats():
+    """Domains from blocklists/*.txt, reloaded whenever a file changes."""
+    sig = threats_signature()
+    with _threats_lock:
+        if sig == _threats["sig"]:
+            return _threats
+        domains, seen, files = [], set(), []
+        for name, _, _ in sig:
+            n = 0
+            try:
+                with open(os.path.join(BLOCKLIST_DIR, name), encoding="utf-8-sig") as f:
+                    for line in f:
+                        d = normalize_domain(line.split("#", 1)[0])
+                        if d and d not in seen:
+                            seen.add(d)
+                            domains.append(d)
+                            n += 1
+            except OSError:
+                continue
+            files.append({"file": name, "domains": n})
+        _threats.update({"sig": sig, "domains": domains, "files": files})
+        return _threats
+
+
 class Snapshot:
     """Immutable, cached view of companies + global policy used on every check-in."""
 
-    def __init__(self, companies, policy):
+    def __init__(self, companies, policy, threats=()):
+        self.threats = list(threats)
         self.companies = companies
         self.by_id = {c["id"]: c for c in companies}
         self.policy = policy
@@ -831,8 +877,21 @@ class Snapshot:
             res = {"enforceMode": mode, "whitelist": wl, "blacklist": bl,
                    "modeSource": "company" if company["policy_mode"] in MODES else "global",
                    "company": company["name"], "companyId": company["id"]}
+        # Built-in phishing domains are blocked in every mode. "All sites open"
+        # is delivered as blacklist mode with only those domains; an exact entry
+        # on the allowed list is the way to exempt a false positive.
+        allowed = set(res["whitelist"])
+        threats = [d for d in self.threats if d not in allowed]
+        mode, bl = res["enforceMode"], res["blacklist"]
+        if threats and mode == "off":
+            mode, bl = "blacklist", threats
+        elif threats and mode == "blacklist":
+            tset = set(threats)
+            bl = threats + [d for d in bl if d not in tset]
+        res["deliverMode"] = mode
+        res["threats"] = len(threats)
         res["deliverWhitelist"], t1 = cap_domains(res["whitelist"])
-        res["deliverBlacklist"], t2 = cap_domains(res["blacklist"])
+        res["deliverBlacklist"], t2 = cap_domains(bl)
         res["truncated"] = t1 or t2
         self._effective[key] = res
         return res
@@ -850,12 +909,14 @@ def invalidate():
 
 def snapshot():
     global _snapshot
+    threats = load_threats()
     with _snapshot_lock:
-        if _snapshot is None:
+        if _snapshot is None or _snapshot.threat_sig != threats["sig"]:
             with read_db() as c:
                 rows = [company_row_to_dict(r) for r in c.execute("SELECT * FROM companies ORDER BY name COLLATE NOCASE")]
                 policy = load_policy(c)
-            _snapshot = Snapshot(rows, policy)
+            _snapshot = Snapshot(rows, policy, threats["domains"])
+            _snapshot.threat_sig = threats["sig"]
         return _snapshot
 
 
@@ -1501,10 +1562,10 @@ def _checkin(h, kind):
     h.json(200, {
         "ok": True,
         "heartbeatSec": HEARTBEAT_SEC,
-        "config": {"enforceMode": eff["enforceMode"], "whitelist": eff["deliverWhitelist"],
+        "config": {"enforceMode": eff["deliverMode"], "whitelist": eff["deliverWhitelist"],
                    "blacklist": eff["deliverBlacklist"]},
         "policy": {"company": eff["company"], "scope": "company" if company else "global",
-                   "mode": eff["enforceMode"], "match": how},
+                   "mode": eff["deliverMode"], "match": how},
     })
 
 
@@ -2080,7 +2141,9 @@ def r_policy(h):
     h.json(200, {"ok": True, "policy": {"enforceMode": p["enforceMode"], "whitelist": text_domains(p["whitelist"]),
                                         "blacklist": text_domains(p["blacklist"]), "rev": p.get("rev", 0)},
                  "overrides": overrides, "limits": {"globalChars": GLOBAL_LIST_MAX_CHARS,
-                                                    "companyChars": COMPANY_LIST_MAX_CHARS}})
+                                                    "companyChars": COMPANY_LIST_MAX_CHARS},
+                 "threats": {"domains": snap.threats, "files": load_threats()["files"],
+                             "exempt": [d for d in snap.threats if d in set(text_domains(p["whitelist"]))]}})
 
 
 @route("POST", "/api/policy")
@@ -2186,7 +2249,10 @@ def r_request_resolve(h):
                     cbl.append(domain)
                 if action == "approve":
                     mode = comp["policy_mode"] if comp["policy_mode"] in MODES else gpol["enforceMode"]
-                    eff_bl = [d for d in text_domains(gpol["blacklist"]) if d not in set(cwl)] + cbl
+                    threats = load_threats()["domains"]
+                    if threats and mode == "off":
+                        mode = "blacklist"
+                    eff_bl = [d for d in text_domains(gpol["blacklist"]) if d not in set(cwl)] + cbl + threats
                     parent = blocking_parent(domain, mode, eff_bl)
                     if parent:
                         results.append({"id": rid, "domain": domain, "skipped": "parent_blocked", "parent": parent})
@@ -2200,7 +2266,9 @@ def r_request_resolve(h):
                        "blacklist": list_edit(gpol["blacklist"], remove=domain)}
                 new[add_to] = list_edit(new[add_to], add=domain)
                 if action == "approve":
-                    parent = blocking_parent(domain, gpol["enforceMode"], text_domains(new["blacklist"]))
+                    threats = load_threats()["domains"]
+                    gmode = "blacklist" if (threats and gpol["enforceMode"] == "off") else gpol["enforceMode"]
+                    parent = blocking_parent(domain, gmode, text_domains(new["blacklist"]) + threats)
                     if parent:
                         results.append({"id": rid, "domain": domain, "skipped": "parent_blocked", "parent": parent})
                         continue
@@ -2380,6 +2448,8 @@ def main(argv):
         tls_srv.socket = ctx.wrap_socket(tls_srv.socket, server_side=True)
         threading.Thread(target=tls_srv.serve_forever, daemon=True).start()
         print("HTTPS:      https://%s:%d" % (HOST, tls_port))
+    th = load_threats()
+    print("Blocklists: %d phishing domains from %s" % (len(th["domains"]), ", ".join(f["file"] for f in th["files"]) or "none"))
     if DNS_INTERVAL > 0:
         threading.Thread(target=dns_loop, daemon=True).start()
         print("AD DNS:     computer IPs refreshed every %d s from each company's DC" % max(60, DNS_INTERVAL))

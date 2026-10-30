@@ -1,0 +1,200 @@
+# Highway.com phishing / typosquat / compound domainlar to'liq ro'yxati
+# Scan: 2026-10-30 | Tools: dnstwist + DNS probe + OSINT + Diesel Vortex IOC + Proofpoint IOC
+# Faqat ro'yxatdan o'tgan (registered) domainlar
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 1: Typosquat domainlar (dnstwist — 76 ta)
+# ═══════════════════════════════════════════════════════════════
+
+bhighway.com
+h1ghway.com
+hgihway.com
+hig.hway.com
+hi.ghway.com
+high-way.com
+highaay.com
+highaway.com
+highgay.com
+highhway.com
+highsay.com
+highsway.com
+highvvay.com
+highwa.com
+highway1.com
+highway2.com
+highway3.com
+highway4.com
+highway5.com
+highway6.com
+highway7.com
+highway8.com
+highway9.com
+highwaya.com
+highwayb.com
+highwayc.com
+highwaycom.com
+highwayd.com
+highwaye.com
+highwayf.com
+highwayh.com
+highwayi.com
+highwayj.com
+highwayl.com
+highwaym.com
+highwayn.com
+highwayo.com
+highwayp.com
+highwayq.com
+highwayr.com
+highways.com
+highwayt.com
+highwayu.com
+highwayv.com
+highwayw.com
+highwayx.com
+highwayy.com
+highwayz.com
+highwag.com
+highwah.com
+highwai.com
+highwas.com
+highwax.com
+highwcy.com
+highweay.com
+highwey.com
+highwqy.com
+highwway.com
+highwy.com
+highzway.com
+higgway.com
+hignway.com
+higway.com
+hihway.com
+hiighway.com
+hlghway.com
+hughway.com
+huighway.com
+hyghway.com
+hyighway.com
+nhighway.com
+nighway.com
+xn--highwy-00a.com
+zhighway.com
+zighway.com
+hhighway.com
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 2: Compound domainlar — "highway-*" / "*highway*" (DNS probe — 34 ta)
+# ═══════════════════════════════════════════════════════════════
+
+highway-carrier-sign.com
+highway-carrier.com
+highway-onboarding.com
+highway-hub.com
+highway-logistics.com
+highway-transport.com
+highway-compliance.com
+highway-service.com
+highwaycarrier.com
+highwayonboarding.com
+highwayportal.com
+highwaysign.com
+highwayfreight.com
+highwaybroker.com
+highwayfleet.com
+highwaydispatch.com
+highwaylogistics.com
+highwaytrucking.com
+highwaytransport.com
+highwayconnect.com
+highwayhub.com
+highwaypro.com
+highwaysystems.com
+highwaymc.com
+highwayservice.com
+highwaycompliance.com
+highwayaccount.com
+highwaysecure.com
+myhighway.com
+gohighway.com
+onboardhighway.com
+highwayapp.com
+freighthighway.com
+verify-highway.com
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 3: OSINT / forum / campaign domainlar (6 ta)
+# ═══════════════════════════════════════════════════════════════
+
+highwayon.com
+auth-highway.com
+highway.cargoesconvoys.icu
+
+# FMCSA Motus impersonation:
+dot.motusdatasboard.com
+dot.motusdatadesk.com
+dot.motuswebdeck.com
+dot.motusfunction.com
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 4: Diesel Vortex kampaniyasi (freight/logistics phishing — 8 ta)
+# Manba: Have I Been Squatted + Ctrl-Alt-Intel, 2026-02
+# ═══════════════════════════════════════════════════════════════
+
+rsrmissecured.top
+penskecar.rsrmissecured.top
+lpanel-bumaepxuje.top
+lpanel-bumaepxuje-iframe.top
+lpanel-bckaoplsks.top
+lpanel-kkbnukltpo.top
+globalprofit-lpanel-abcdefghij.top
+cargoesconvoys.icu
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 5: Proofpoint IOC — freight carrier phishing (26 ta)
+# Manba: Proofpoint "Remote Access, Real Cargo" + Gurucul, 2025
+# ═══════════════════════════════════════════════════════════════
+
+carrier-packets.net
+carrier-packets.com
+carrierpack.net
+scarrierpack.com
+carrieragreements.com
+carriersetup.net
+carrierpacket.online
+brokeragepacket.com
+brokerpackets.com
+brokercarriersetup.com
+centraldispach.net
+confirmation-rate.com
+wjwrateconfirmation.com
+rateconfirm.net
+ratecnf.com
+ratecnf.net
+fleetcarrier.net
+fleetgo0.com
+car-hauling.com
+vehicle-release.com
+claimeprogressive.com
+ilove-pdf.net
+i-lovepdf.net
+billpay-info.com
+nextgen223.com
+nextgen1.net
+nextgen01.net
+officews101.com
+dwssa.top
+
+# ═══════════════════════════════════════════════════════════════
+# JAMI: 154 ta unique domain
+#
+# Manbalar:
+# - dnstwist DNS fuzzing (typosquat, homoglyph, bitsquatting)
+# - DNS A/NS probe (compound highway-* domainlar)
+# - Have I Been Squatted — Diesel Vortex IOC report (2026-02)
+# - Proofpoint — "Remote Access, Real Cargo" IOC (2025-10)
+# - Gurucul — extended Proofpoint IOC (2025-11)
+# - TruckersReport forum — Highway phishing warning (2025-01)
+# - Cyberyn — freight inbox phishing analysis
+# - FMCSA — Motus impersonation advisory
+# ═══════════════════════════════════════════════════════════════

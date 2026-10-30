@@ -559,4 +559,10 @@ export default {
   'One-time setup on this Linux computer': 'Shu Linux kompyuterda bir martalik sozlash',
   'Needs xfreerdp (sudo apt install freerdp2-x11 or freerdp3-x11). The helper only connects to private addresses and asks before connecting.': 'xfreerdp kerak (sudo apt install freerdp2-x11 yoki freerdp3-x11). Yordamchi faqat ichki manzillarga ulanadi va ulanishdan oldin so‘raydi.',
   'Every office with its computers and browsers. Open a company to see its computers, their local IPs and status.': 'Har bir ofis, uning kompyuterlari va brauzerlari. Kompyuterlar, ularning local IP’lari va holatini ko‘rish uchun kompaniyani oching.',
+
+  // Fishing ro‘yxati
+  'Only the built-in phishing list is blocked. Everything else opens.': 'Faqat doimiy fishing ro‘yxati bloklanadi. Qolgan saytlar ochiladi.',
+  'Let through: it is on the allowed list': 'O‘tkaziladi: ruxsat etilganlar ro‘yxatida bor',
+  'Built-in phishing list': 'Doimiy fishing ro‘yxati',
+  'Blocked in every mode, also when all sites are open. Loaded on the server from {files}. To let one of them through, add the exact domain to Allowed sites.': 'Har qanday rejimda, hatto barcha saytlar ochiq bo‘lganda ham bloklanadi. Serverdagi {files} faylidan olinadi. Ulardan birini o‘tkazish uchun aynan shu domenni “Ruxsat etilgan saytlar” ga qo‘shing.',
 };

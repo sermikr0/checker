@@ -65,6 +65,16 @@ It opens a terminal, shows the target, and runs
 Only private addresses are accepted. The user name is set per browser in
 Settings → Remote desktop.
 
+## Built-in phishing list
+
+`blocklists/*.txt` (one domain per line, `#` comments) is blocked on every
+browser in **every mode** — also when the global mode is *all sites open*,
+which is then delivered as blacklist mode with just these domains. Subdomains
+are included. The server reloads the files when they change; the Global
+policy page lists them. To let a false positive through, add the exact domain
+to *Allowed sites*. `blocklists/freight-phishing.txt` holds 154 Highway
+look-alike and freight-phishing domains (dnstwist, Diesel Vortex and Proofpoint IOCs).
+
 ## Company policy (server)
 
 The dashboard edits the global policy only. Rules a company got earlier are
@@ -105,6 +115,7 @@ Cloudflare Tunnel setup: see [DEPLOYMENT.md](DEPLOYMENT.md).
 | `FLEET_LOG_HEARTBEATS` | `0` | `1` logs every heartbeat request |
 | `FLEET_DNS_INTERVAL` | `900` | Seconds between AD DNS lookups of computer IPs (`0` = only on *Refresh IPs*) |
 | `FLEET_DNS_TIMEOUT` / `FLEET_DNS_PORT` | `1.0` / `53` | DNS query timeout and port |
+| `FLEET_BLOCKLIST_DIR` | `blocklists/` next to `server.py` | Folder with the built-in phishing lists |
 
 ## Security model
 

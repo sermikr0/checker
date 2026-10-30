@@ -33,6 +33,7 @@ def use_data_dir(path):
     server.LEGACY_TOKEN_PATH = os.path.join(path, "admin_token.txt")
     server.DOWNLOAD_DIR = os.path.join(path, "downloads")
     server.COMPANIES_SEED = [os.path.join(path, "companies.json")]
+    server.BLOCKLIST_DIR = os.path.join(path, "blocklists")      # empty unless a test writes one
     server.invalidate()
 
 
@@ -714,6 +715,79 @@ class ComputersTests(ServerCase):
         st, body, _ = a.call("GET", "/api/companies/export", raw=True)
         kappa = [c for c in json.loads(body) if c["name"] == "Kappa"][0]
         self.assertEqual(kappa["computers"], ["K-1 10.9.9.1", "K-2"])
+
+
+class BlocklistTests(ServerCase):
+    def write_list(self, text, name="test.txt"):
+        os.makedirs(server.BLOCKLIST_DIR, exist_ok=True)
+        path = os.path.join(server.BLOCKLIST_DIR, name)
+        with open(path, "w") as f:
+            f.write(text)
+        os.utime(path, None)
+        return path
+
+    def tearDown(self):
+        import shutil as _sh
+        _sh.rmtree(server.BLOCKLIST_DIR, ignore_errors=True)
+        server.invalidate()
+
+    def test_repo_blocklist_is_valid(self):
+        with open(os.path.join(ROOT, "blocklists", "freight-phishing.txt"), encoding="utf-8") as f:
+            entries = [ln.split("#", 1)[0].strip() for ln in f]
+        entries = [e for e in entries if e]
+        self.assertEqual(len(entries), 154)
+        self.assertTrue(all(server.normalize_domain(e) == e.lower() for e in entries))
+
+    def test_blocked_in_open_mode_and_merged_in_blacklist_mode(self):
+        a = self.admin()
+        a.post("/api/policy", {"enforceMode": "off", "whitelist": [], "blacklist": ["facebook.com"]})
+        self.write_list("# comment\nhighwaa.com\n\nHighway-Carrier.com  # inline comment\nnot a domain!\n")
+        st, j = self.checkin("dev-block-0001", "192.0.2.77", "enroll")
+        self.assertEqual(j["config"]["enforceMode"], "blacklist", "open mode still blocks the phishing list")
+        self.assertEqual(j["config"]["blacklist"].split("\n"), ["highwaa.com", "highway-carrier.com"],
+                         "only the phishing list — the admin's blacklist is not enforced in open mode")
+        a.post("/api/policy", {"enforceMode": "blacklist"})
+        st, j = self.checkin("dev-block-0001", "192.0.2.77")
+        self.assertEqual(j["config"]["blacklist"].split("\n"), ["highwaa.com", "highway-carrier.com", "facebook.com"])
+        # an exact entry on the allowed list exempts a false positive
+        a.post("/api/policy", {"whitelist": ["highwaa.com"]})
+        st, j = self.checkin("dev-block-0001", "192.0.2.77")
+        self.assertNotIn("highwaa.com", j["config"]["blacklist"].split("\n"))
+        info = a.get("/api/policy")[1]["threats"]
+        self.assertEqual(info["exempt"], ["highwaa.com"])
+        self.assertEqual(info["files"], [{"file": "test.txt", "domains": 2}])
+        a.post("/api/policy", {"enforceMode": "off", "whitelist": [], "blacklist": []})
+
+    def test_whitelist_mode_unchanged_and_ui_mode_untouched(self):
+        a = self.admin()
+        a.post("/api/policy", {"enforceMode": "whitelist", "whitelist": ["google.com"], "blacklist": []})
+        self.write_list("highwaa.com\n")
+        st, j = self.checkin("dev-block-0002", "192.0.2.78", "enroll")
+        self.assertEqual(j["config"]["enforceMode"], "whitelist")
+        self.assertEqual(a.get("/api/overview")[1]["policy"]["mode"], "whitelist")
+        a.post("/api/policy", {"enforceMode": "off", "whitelist": []})
+        self.assertEqual(a.get("/api/overview")[1]["policy"]["mode"], "off", "dashboard shows the admin's mode")
+
+    def test_list_reloads_when_the_file_changes(self):
+        self.write_list("one-bad.example\n")
+        st, j = self.checkin("dev-block-0003", "192.0.2.79", "enroll")
+        self.assertEqual(j["config"]["blacklist"], "one-bad.example")
+        import time as _t
+        _t.sleep(0.02)
+        self.write_list("one-bad.example\ntwo-bad.example\n")
+        st, j = self.checkin("dev-block-0003", "192.0.2.79")
+        self.assertEqual(j["config"]["blacklist"], "one-bad.example\ntwo-bad.example")
+
+    def test_subdomain_of_listed_domain_cannot_be_approved(self):
+        a = self.admin()
+        self.write_list("rsrmissecured.top\n")
+        self.checkin("dev-block-0004", "10.1.7.7", "enroll")
+        st, _ = Client(self.base).post("/api/request-access", {"deviceId": "dev-block-0004", "url": "https://penskecar.rsrmissecured.top/"},
+                                       headers={"CF-Connecting-IP": "10.1.7.7"}, csrf=False)
+        rid = [r for r in a.get("/api/requests")[1]["requests"] if r["domain"] == "penskecar.rsrmissecured.top"][0]["id"]
+        st, j = a.post("/api/requests/resolve", {"id": rid, "action": "approve", "scope": "global"})
+        self.assertEqual(j["results"][0].get("skipped"), "parent_blocked")
+        a.post("/api/requests/resolve", {"id": rid, "action": "reject"})
 
 
 class ProxyModeTests(ServerCase):

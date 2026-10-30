@@ -1,7 +1,7 @@
 import { h, icon, replace } from '../dom.js';
 import { api, post } from '../api.js';
 import { t, tn, num } from '../i18n.js';
-import { plate, domainEditor, confirmDialog, toast, errText, empty, MODE_LABEL } from '../ui.js';
+import { plate, domainEditor, confirmDialog, toast, errText, empty, MODE_LABEL, searchBox } from '../ui.js';
 import { loading, failed } from './common.js';
 
 export async function render(page, params, ctx) {
@@ -29,8 +29,9 @@ export async function render(page, params, ctx) {
   };
 
   const picker = h('div', { class: 'plate-picker', role: 'radiogroup', 'aria-label': t('Policy mode') });
+  const threats = data.threats || { domains: [], files: [], exempt: [] };
   const OPTIONS = [
-    ['off', t('Nothing is blocked. The extension still warns about risky links.')],
+    ['off', threats.domains.length ? t('Only the built-in phishing list is blocked. Everything else opens.') : t('Nothing is blocked. The extension still warns about risky links.')],
     ['blacklist', t('Sites on the blocked list are stopped with a warning page. Everything else opens.')],
     ['whitelist', t('Only the allowed list opens. Every other site shows the warning page and a request button.')],
   ];
@@ -105,6 +106,22 @@ export async function render(page, params, ctx) {
         } }, t('Back to global'))))))))
     : empty('building', t('Every company follows this policy'), t('Open a company and choose its own mode or lists when an office needs different rules.'));
 
+  const threatTags = h('div', { class: 'tag-list' });
+  const paintThreats = (q) => {
+    const exempt = new Set(threats.exempt);
+    const list = threats.domains.filter((d) => !q || d.includes(q.trim().toLowerCase()));
+    replace(threatTags, list.length ? list.map((d) => h('span', { class: 'tag' + (exempt.has(d) ? ' tag--strike' : ''), title: exempt.has(d) ? t('Let through: it is on the allowed list') : '' }, d))
+      : h('span', { class: 'muted' }, t('Nothing matches “{q}”.', { q })));
+  };
+  paintThreats('');
+  const threatPanel = threats.domains.length ? h('section', { class: 'panel', style: { marginTop: '20px' } },
+    h('div', { class: 'panel-head' }, h('h2', null, t('Built-in phishing list')), h('span', { class: 'badge badge--danger' }, num(threats.domains.length)),
+      h('p', null, t('Blocked in every mode, also when all sites are open. Loaded on the server from {files}. To let one of them through, add the exact domain to Allowed sites.',
+        { files: threats.files.map((f) => 'blocklists/' + f.file).join(', ') }))),
+    h('div', { class: 'panel-body', style: { display: 'grid', gap: '12px' } },
+      h('div', { class: 'toolbar', style: { margin: 0 } }, searchBox('', paintThreats, t('Find in list'))),
+      threatTags)) : null;
+
   replace(page,
     h('header', { class: 'page-head' },
       h('div', { class: 'titles' }, h('h1', { class: 'page-title' }, t('Global policy')),
@@ -113,6 +130,7 @@ export async function render(page, params, ctx) {
       h('div', { class: 'panel-head' }, h('h2', null, t('Mode')), h('p', null, t('Currently {mode}.', { mode: MODE_LABEL[data.policy.enforceMode]() }))),
       h('div', { class: 'panel-body' }, picker)),
     h('div', { class: 'grid-even', style: { marginTop: '20px' } }, allow.el, block.el),
+    threatPanel,
     h('section', { class: 'panel', style: { marginTop: '20px' } },
       h('div', { class: 'panel-head' }, h('h2', null, t('Companies with their own rules')), h('span', { class: 'badge' }, num(data.overrides.length)),
         h('p', null, t('Rules set earlier for single companies. They still apply; return a company to the global policy to remove them.'))),
