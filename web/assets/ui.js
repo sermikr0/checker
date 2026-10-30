@@ -156,7 +156,7 @@ export function lane(online, total, { max = 44 } = {}) {
   const label = t('{on} online, {off} offline', { on: online, off: total - online });
   if (total > max) {
     return h('div', { class: 'lane--bar', role: 'img', 'aria-label': label, title: label },
-      h('span', { style: { width: (online / total * 100).toFixed(1) + '%' } }));
+      online ? h('span', { style: { width: (online / total * 100).toFixed(1) + '%' } }) : null);
   }
   const ticks = [];
   for (let i = 0; i < total; i++) ticks.push(h('i', { class: i < online ? 'on' : '', style: { '--i': i } }));

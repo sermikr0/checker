@@ -35,39 +35,13 @@ export async function render(page, params, ctx) {
 }
 
 function view(o, ctx) {
-  const d = o.devices;
   const out = [];
 
-  // Headline: how much of the fleet is talking to us right now.
-  const head = h('section', { class: 'statement' });
-  if (!d.total) {
-    head.append(h('h1', null, t('No browsers have checked in yet')),
-      h('p', { class: 'page-sub' }, t('Install the extension with the force-install policy and devices will appear here within a minute.')));
-  } else {
-    head.append(h('h1', null,
-      h('span', { class: 'num' }, num(d.online)),
-      h('span', { class: 'of num' }, ' / ' + num(d.total)), ' ',
-      t('browsers online')));
-  }
-  const facts = h('div', { class: 'statement-facts' });
+  out.push(h('header', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', { class: 'page-title' }, t('Overview')))));
   if (ctx.me && ctx.me.proxyMismatch) {
     out.push(h('div', { class: 'note note--warn', style: { marginBottom: '18px' } }, icon('alert', 18),
       h('div', null, t('Browsers reach this server through Cloudflare, but the server is not reading their real address. Set FLEET_TRUST_PROXY=cloudflare in docker-compose.yml and restart — until then every browser looks like it comes from the same address and cannot be matched to its company.'))));
   }
-  facts.append(h('span', { class: 'fact' }, plate(o.policy.mode, { size: 'sm' }),
-    h('a', { href: '#/policy' }, t('Global policy')),
-    o.policy.overrides ? h('span', null, tn(o.policy.overrides, '{n} company has its own', '{n} companies have their own')) : null));
-  if (o.requests.pending) {
-    facts.append(h('span', { class: 'fact' }, icon('inbox', 17),
-      h('a', { href: '#/requests' }, tn(o.requests.pending, '{n} access request is waiting', '{n} access requests are waiting'))));
-  }
-  if (d.unmatched) {
-    facts.append(h('span', { class: 'fact' }, icon('alert', 17),
-      h('a', { href: '#/companies' }, tn(d.unmatched, '{n} device is not linked to a company', '{n} devices are not linked to a company'))));
-  }
-  if (d.new24h) facts.append(h('span', { class: 'fact' }, icon('plus', 17), tn(d.new24h, '{n} new in the last 24 hours', '{n} new in the last 24 hours')));
-  head.append(facts);
-  out.push(head);
 
   // Requests that need a decision.
   if (o.requests.top && o.requests.top.length) {
