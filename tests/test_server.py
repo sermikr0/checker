@@ -281,8 +281,7 @@ class FleetTests(ServerCase):
         st, j = a.post("/api/requests/resolve", {"id": reqs[0]["id"], "action": "approve", "scope": "company"})
         self.assertEqual(st, 200, j)
         self.assertEqual(j["results"][0]["scope"], "company")
-        detail = a.get("/api/companies/%d" % beta)[1]["company"]
-        self.assertIn("tools.example.org", detail["policyDetail"]["whitelist"])
+        self.assertIn("tools.example.org", server.snapshot().by_id[beta]["whitelist"])
         glob = a.get("/api/policy")[1]["policy"]
         self.assertNotIn("tools.example.org", glob["whitelist"])
         st, j = self.checkin("dev-beta-req01", "10.2.1.1")
@@ -583,6 +582,138 @@ class HardeningTests(ServerCase):
         self.assertTrue(all(server.normalize_domain(d) for d in wl.split("\n")), "never cut inside a domain")
         a.post("/api/companies/%d/policy" % comp["id"], {"whitelist": []})
         a.post("/api/policy", {"whitelist": []})
+
+
+class FakeDNS:
+    """Tiny authoritative DNS on 127.0.0.1 answering A queries from a dict."""
+
+    def __init__(self, records):
+        self.records = {k.lower(): v for k, v in records.items()}
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        self.queries = []
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        import struct
+        while True:
+            try:
+                data, addr = self.sock.recvfrom(512)
+            except OSError:
+                return
+            tid = data[:2]
+            pos, labels = 12, []
+            while data[pos]:
+                ln = data[pos]
+                labels.append(data[pos + 1:pos + 1 + ln].decode())
+                pos += 1 + ln
+            qend = pos + 5
+            name = ".".join(labels).lower()
+            self.queries.append(name)
+            question = data[12:qend]
+            ip = self.records.get(name)
+            if ip is None and name.count(".") <= 1:      # the domain itself: answer "no A record"
+                hdr = tid + struct.pack(">HHHHH", 0x8180, 1, 0, 0, 0)
+                self.sock.sendto(hdr + question, addr)
+            elif ip is None:
+                hdr = tid + struct.pack(">HHHHH", 0x8183, 1, 0, 0, 0)
+                self.sock.sendto(hdr + question, addr)
+            else:
+                hdr = tid + struct.pack(">HHHHH", 0x8180, 1, 1, 0, 0)
+                ans = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + socket.inet_aton(ip)
+                self.sock.sendto(hdr + question + ans, addr)
+
+    def close(self):
+        self.sock.close()
+
+
+class ComputersTests(ServerCase):
+    def test_parse_computers_accepts_names_ips_and_objects(self):
+        names, ips, bad = server.parse_computers("PC-01\nPC-02 10.1.0.22\npc-01\n{bad")
+        self.assertEqual(names, ["PC-01", "PC-02", "{bad"])
+        self.assertEqual(ips, {"pc-02": "10.1.0.22"})
+        names, ips, bad = server.parse_computers([{"name": "A", "ip": "10.0.0.1"}, "B nonsense"])
+        self.assertEqual(bad, ["B nonsense"])
+
+    def test_dns_lookup_against_the_company_dc(self):
+        dns = FakeDNS({"pc-01.zeta.local": "10.70.0.21", "pc-02.zeta.local": "10.70.0.22"})
+        old = server.DNS_PORT
+        server.DNS_PORT = dns.port
+        try:
+            a = self.admin()
+            st, j = a.post("/api/companies", {"name": "Zeta", "domain": "zeta.local", "dc_ip": "127.0.0.1",
+                                              "computers": "PC-01\nPC-02\nPC-03 10.70.0.99"})
+            self.assertEqual(st, 200, j)
+            cid = j["id"]
+            st, j = a.post("/api/companies/%d/resolve" % cid)
+            self.assertEqual(st, 200, j)
+            self.assertEqual((j["dns"]["status"], j["dns"]["found"], j["dns"]["total"]), ("ok", 2, 3))
+            pcs = {p["name"]: p for p in a.get("/api/companies/%d" % cid)[1]["company"]["computerList"]}
+            self.assertEqual((pcs["PC-01"]["ip"], pcs["PC-01"]["ipSource"]), ("10.70.0.21", "dns"))
+            self.assertEqual((pcs["PC-03"]["ip"], pcs["PC-03"]["ipSource"]), ("10.70.0.99", "manual"))
+            self.assertIn("pc-01.zeta.local", dns.queries)
+        finally:
+            server.DNS_PORT = old
+            dns.close()
+
+    def test_unreachable_dc_is_reported(self):
+        old_port, old_to = server.DNS_PORT, server.DNS_TIMEOUT
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))          # bound but never answers
+        server.DNS_PORT, server.DNS_TIMEOUT = sock.getsockname()[1], 0.2
+        try:
+            a = self.admin()
+            st, j = a.post("/api/companies", {"name": "Silent", "domain": "silent.local", "dc_ip": "127.0.0.1",
+                                              "computers": ["S-1"]})
+            st, j = a.post("/api/companies/%d/resolve" % j["id"])
+            self.assertEqual(j["dns"]["status"], "unreachable")
+        finally:
+            server.DNS_PORT, server.DNS_TIMEOUT = old_port, old_to
+            sock.close()
+
+    def test_computer_status_comes_from_the_extension_computer_name(self):
+        a = self.admin()
+        st, j = a.post("/api/companies", {"name": "Eta", "domain": "eta.local", "computers": ["ETA-01", "ETA-02", "PC-221"]})
+        cid = j["id"]
+        # the computer name alone identifies the company, even from an unknown address
+        c = Client(self.base)
+        st, j = c.post("/api/enroll", {"deviceId": "dev-eta-0001", "version": "2.4.0", "userAgent": "UA", "computerName": "eta-01"},
+                       headers={"CF-Connecting-IP": "192.0.2.10"}, csrf=False)
+        self.assertEqual(j["policy"]["company"], "Eta")
+        self.assertEqual(j["policy"]["match"], "computer")
+        # a computer name outside the AD list still shows up, flagged
+        c.post("/api/enroll", {"deviceId": "dev-eta-0002", "version": "2.4.0", "userAgent": "UA", "computerName": "NEW-PC"},
+               headers={"CF-Connecting-IP": "192.0.2.10"}, csrf=False)
+        a.post("/api/devices/update", {"deviceIds": ["dev-eta-0002"], "companyId": cid})
+        # bad names are ignored
+        c.post("/api/heartbeat", {"deviceId": "dev-eta-0001", "version": "2.4.0", "computerName": "<script>"},
+               headers={"CF-Connecting-IP": "192.0.2.10"}, csrf=False)
+        pcs = {p["name"]: p for p in a.get("/api/companies/%d" % cid)[1]["company"]["computerList"]}
+        self.assertEqual(pcs["ETA-01"]["status"], "online")
+        self.assertEqual(pcs["ETA-01"]["version"], "2.4.0")
+        self.assertEqual(pcs["ETA-02"]["status"], "none")
+        self.assertFalse(pcs["NEW-PC"]["listed"])
+        self.assertEqual(pcs["NEW-PC"]["status"], "online")
+
+    def test_same_computer_name_in_two_companies_uses_the_address(self):
+        a = self.admin()
+        a.post("/api/companies", {"name": "Theta", "nat_ips": ["203.0.113.80"], "computers": ["DUP-PC"]})
+        a.post("/api/companies", {"name": "Iota", "nat_ips": ["203.0.113.81"], "computers": ["DUP-PC"]})
+        c = Client(self.base)
+        st, j = c.post("/api/enroll", {"deviceId": "dev-dup-00001", "version": "2.4.0", "computerName": "DUP-PC"},
+                       headers={"CF-Connecting-IP": "203.0.113.81"}, csrf=False)
+        self.assertEqual((j["policy"]["company"], j["policy"]["match"]), ("Iota", "computer"))
+        st, j = c.post("/api/enroll", {"deviceId": "dev-dup-00002", "version": "2.4.0", "computerName": "DUP-PC"},
+                       headers={"CF-Connecting-IP": "192.0.2.99"}, csrf=False)
+        self.assertIsNone(j["policy"]["company"], "two candidates and no address hint: do not guess")
+
+    def test_export_keeps_manual_ips(self):
+        a = self.admin()
+        a.post("/api/companies", {"name": "Kappa", "computers": "K-1 10.9.9.1\nK-2"})
+        st, body, _ = a.call("GET", "/api/companies/export", raw=True)
+        kappa = [c for c in json.loads(body) if c["name"] == "Kappa"][0]
+        self.assertEqual(kappa["computers"], ["K-1 10.9.9.1", "K-2"])
 
 
 class ProxyModeTests(ServerCase):

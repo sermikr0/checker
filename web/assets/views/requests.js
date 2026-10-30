@@ -1,12 +1,13 @@
 import { h, icon, replace, store } from '../dom.js';
 import { api, post } from '../api.js';
 import { t, tn, num } from '../i18n.js';
-import { when, empty, seg, searchBox, toast, errText, confirmDialog } from '../ui.js';
+import { when, empty, searchBox, toast, errText, confirmDialog } from '../ui.js';
 import { loading, failed } from './common.js';
 
 export async function render(page, params, ctx) {
   document.title = t('Access requests') + ' — Fleet';
-  const state = Object.assign({ tab: 'pending', scope: 'company', q: '' }, store('requests') || {});
+  const state = Object.assign({ tab: 'pending', q: '' }, store('requests') || {});
+  state.scope = 'global';   // company-level lists are not edited in the dashboard any more
   const save = () => store('requests', state);
   const selected = new Set();
   let pending = [];
@@ -14,7 +15,7 @@ export async function render(page, params, ctx) {
 
   page.append(h('header', { class: 'page-head' },
     h('div', { class: 'titles' }, h('h1', { class: 'page-title' }, t('Access requests')),
-      h('p', { class: 'page-sub' }, t('When someone hits a blocked site they can ask for it. Allowing adds the site to the allowed list, blocking adds it to the blocked list.')))));
+      h('p', { class: 'page-sub' }, t('When someone hits a blocked site they can ask for it. Allowing adds the site to the global allowed list, blocking adds it to the global blocked list.')))));
   const tabsEl = h('div', { class: 'tabs', role: 'tablist' });
   const toolbar = h('div', { class: 'toolbar' });
   const selBar = h('div');
@@ -32,14 +33,6 @@ export async function render(page, params, ctx) {
 
   function paintToolbar() {
     const parts = [searchBox(state.q, (q) => { state.q = q; save(); paintList(); }, t('Search site or company…'))];
-    if (state.tab === 'pending') {
-      parts.push(h('span', { class: 'spacer' }),
-        h('span', { class: 'field-label' }, t('Decisions apply to')),
-        seg([
-          { value: 'company', label: t('The requester’s company'), icon: 'building' },
-          { value: 'global', label: t('Every company'), icon: 'globe' },
-        ], state.scope, (v) => { state.scope = v; save(); paintList(); }, { label: t('Decisions apply to') }));
-    }
     replace(toolbar, ...parts);
   }
 

@@ -31,6 +31,8 @@ import hashlib
 import io
 import ipaddress
 import json
+import random
+import socket
 import os
 import re
 import secrets
@@ -74,6 +76,10 @@ APP_VERSION = "3.0.0"
 APPID = os.environ.get("FLEET_APPID", "lddmakdihlenfbmdpggpahjooglgigoi")
 
 HEARTBEAT_SEC = 60          # devices check in this often
+# Local IPs of AD computers are looked up in each company's AD DNS (its DC).
+DNS_INTERVAL = int(os.environ.get("FLEET_DNS_INTERVAL", "900"))   # seconds; 0 = only on demand
+DNS_PORT = int(os.environ.get("FLEET_DNS_PORT", "53"))
+DNS_TIMEOUT = float(os.environ.get("FLEET_DNS_TIMEOUT", "1.0"))
 ONLINE_SEC = 180            # no check-in for longer than this = offline
 SESSION_IDLE_SEC = 12 * 3600
 SESSION_MAX_SEC = 7 * 24 * 3600
@@ -393,7 +399,7 @@ def init_db():
                        last_ip      TEXT DEFAULT '',
                        enroll_count INTEGER DEFAULT 0,
                        beats        INTEGER DEFAULT 0)""")
-        _ensure_columns(c, "devices", {"company_id": "INTEGER"})
+        _ensure_columns(c, "devices", {"company_id": "INTEGER", "computer_name": "TEXT DEFAULT ''"})
         c.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
         c.execute("""CREATE TABLE IF NOT EXISTS requests (
                        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -418,7 +424,15 @@ def init_db():
                        blacklist   TEXT DEFAULT '',
                        created_at  TEXT,
                        updated_at  TEXT)""")
-        _ensure_columns(c, "companies", {"rev": "INTEGER DEFAULT 0"})
+        _ensure_columns(c, "companies", {"rev": "INTEGER DEFAULT 0", "dns_status": "TEXT DEFAULT ''",
+                                         "dns_checked_at": "TEXT DEFAULT ''", "dns_found": "INTEGER DEFAULT 0"})
+        c.execute("""CREATE TABLE IF NOT EXISTS computer_ips (
+                       company_id INTEGER NOT NULL,
+                       name       TEXT NOT NULL COLLATE NOCASE,
+                       manual_ip  TEXT DEFAULT '',
+                       dns_ip     TEXT DEFAULT '',
+                       dns_at     TEXT DEFAULT '',
+                       PRIMARY KEY (company_id, name))""")
         c.execute("""CREATE TABLE IF NOT EXISTS sessions (
                        token_hash TEXT PRIMARY KEY,
                        username   TEXT,
@@ -508,6 +522,52 @@ def _str_list(value, max_items, max_len):
     return out
 
 
+def parse_computers(value):
+    """AD computer list: "NAME" or "NAME 10.1.2.3" lines, or {"name", "ip"} objects.
+    -> (names, {lower name: manual ip}, invalid entries)"""
+    if value is None:
+        return [], {}, []
+    if isinstance(value, str):
+        value = re.split(r"[\n,;]+", value)
+    if not isinstance(value, (list, tuple)):
+        return [], {}, ["not a list"]
+    names, ips, bad, seen = [], {}, [], set()
+    for item in value:
+        if isinstance(item, dict):
+            name, ip = str(item.get("name") or "").strip(), str(item.get("ip") or "").strip()
+        else:
+            parts = str(item).split()
+            name, ip = (parts[0] if parts else ""), (parts[1] if len(parts) > 1 else "")
+        name = name[:64]
+        if not name:
+            continue
+        if ip:
+            try:
+                ip = str(ipaddress.ip_address(ip))
+            except ValueError:
+                bad.append("%s %s" % (name, ip[:40]))
+                continue
+        if name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        names.append(name)
+        if ip:
+            ips[name.lower()] = ip
+    return names, ips, bad
+
+
+def store_computer_ips(conn, cid, names, manual):
+    """Keep one computer_ips row per AD computer; manual IPs come from the company form."""
+    wanted = {n.lower(): n for n in names}
+    for n in names:
+        conn.execute("""INSERT INTO computer_ips (company_id, name, manual_ip) VALUES (?,?,?)
+                        ON CONFLICT(company_id, name) DO UPDATE SET manual_ip=excluded.manual_ip""",
+                     (cid, n, manual.get(n.lower(), "")))
+    for r in conn.execute("SELECT name FROM computer_ips WHERE company_id=?", (cid,)).fetchall():
+        if r["name"].lower() not in wanted:
+            conn.execute("DELETE FROM computer_ips WHERE company_id=? AND name=?", (cid, r["name"]))
+
+
 def validate_company(data, partial=True):
     """Return (clean dict, errors dict). With partial=True only present keys are validated."""
     if not isinstance(data, dict):
@@ -549,10 +609,13 @@ def validate_company(data, partial=True):
         except ValueError as e:
             errors["nat_ips"] = str(e)
     if has("computers"):
-        try:
-            clean["computers"] = _str_list(data.get("computers"), 5000, 64)
-        except ValueError as e:
-            errors["computers"] = str(e)
+        names, ips, bad = parse_computers(data.get("computers"))
+        if bad:
+            errors["computers"] = "invalid: " + ", ".join(bad[:3])
+        elif len(names) > 5000:
+            errors["computers"] = "too many items (max 5000)"
+        clean["computers"] = names
+        clean["computer_ips"] = ips
     if has("notes"):
         clean["notes"] = str(data.get("notes") or "").strip()[:1000]
     if has("policy_mode") and ("policy_mode" in data):
@@ -573,6 +636,8 @@ def validate_company(data, partial=True):
 
 
 def _insert_company(conn, clean, ts):
+    clean = dict(clean)
+    manual = clean.pop("computer_ips", {})
     cur = conn.execute(
         """INSERT INTO companies (name, domain, dc_ip, subnet, nat_ips, computers, notes,
                                   policy_mode, whitelist, blacklist, created_at, updated_at)
@@ -582,10 +647,15 @@ def _insert_company(conn, clean, ts):
          clean.get("notes", ""), clean.get("policy_mode", "inherit"),
          clean.get("whitelist", ""), clean.get("blacklist", ""), ts, ts),
     )
+    store_computer_ips(conn, cur.lastrowid, clean.get("computers", []), manual)
     return cur.lastrowid
 
 
 def _update_company(conn, cid, clean, ts):
+    clean = dict(clean)
+    manual = clean.pop("computer_ips", None)
+    if "computers" in clean:
+        store_computer_ips(conn, cid, clean["computers"], manual or {})
     sets, vals = [], []
     for k, v in clean.items():
         if k in ("nat_ips", "computers"):
@@ -649,16 +719,10 @@ def migrate_companies(conn, items):
                 elif part not in ips:
                     ips.append(part)
         clean["nat_ips"] = ips[:64]
-        comps = item.get("computers") or []
-        if isinstance(comps, str):
-            comps = re.split(r"[\n,;]+", comps)
-        seen_pc, pcs = set(), []
-        for pc in comps if isinstance(comps, list) else []:
-            pc = str(pc).strip()[:64]
-            if pc and pc.lower() not in seen_pc:
-                seen_pc.add(pc.lower())
-                pcs.append(pc)
+        pcs, pc_ips, pc_bad = parse_computers(item.get("computers") or [])
+        dropped += ["computer %s" % b for b in pc_bad[:5]]
         clean["computers"] = pcs[:5000]
+        clean["computer_ips"] = pc_ips
         note = str(item.get("notes") or "").strip()
         if dropped:
             note = (note + "\n" if note else "") + "Ignored during import: " + ", ".join(dropped)
@@ -694,16 +758,34 @@ class Snapshot:
         self.by_id = {c["id"]: c for c in companies}
         self.policy = policy
         self._index = []
+        self.by_computer = {}
         for c in companies:
             nets_nat = [n for n in (ip_entry_to_network(x) for x in c["nat_ips"]) if n is not None]
             sn = subnet_to_network(c.get("subnet"))
             self._index.append((c, nets_nat, [sn] if sn is not None else []))
+            for pc in c["computers"]:
+                lst = self.by_computer.setdefault(pc.lower(), [])
+                if c not in lst:
+                    lst.append(c)
         self._effective = {}
 
-    def match(self, ip, pinned_id=None):
-        """-> (company or None, how, candidates). how: pinned | nat | subnet | ambiguous | none"""
+    def match(self, ip, pinned_id=None, computer=None):
+        """-> (company or None, how, candidates).
+        how: pinned | computer | nat | subnet | ambiguous | none"""
         if pinned_id and pinned_id in self.by_id:
             return self.by_id[pinned_id], "pinned", []
+        named = self.by_computer.get(str(computer or "").lower(), []) if computer else []
+        if len(named) == 1:
+            return named[0], "computer", []
+        comp, how, cands = self._match_ip(ip)
+        if named:
+            if comp in named:
+                return comp, "computer", []
+            if comp is None:
+                return None, "ambiguous", [c["name"] for c in named]
+        return comp, how, cands
+
+    def _match_ip(self, ip):
         try:
             addr = ipaddress.ip_address(str(ip or "").strip())
         except ValueError:
@@ -837,6 +919,128 @@ def list_edit(text, add=None, remove=None):
     if add and add not in lst:
         lst.append(add)
     return domains_text(lst)
+
+
+# ── Local IPs of AD computers (DNS on the company's domain controller) ──────
+
+def _dns_name(name):
+    out = b""
+    for label in name.strip(".").split("."):
+        raw = (label.encode("ascii") if label.isascii() else label.encode("idna")) if label else b""
+        if not raw or len(raw) > 63:
+            raise ValueError("bad DNS label")
+        out += bytes([len(raw)]) + raw
+    return out + b"\x00"
+
+
+def _dns_skip_name(buf, pos):
+    while True:
+        if pos >= len(buf):
+            raise ValueError("truncated")
+        ln = buf[pos]
+        if ln == 0:
+            return pos + 1
+        if ln & 0xC0 == 0xC0:
+            return pos + 2
+        pos += 1 + ln
+
+
+def dns_query_a(server, name, timeout=None, port=None):
+    """Ask `server` for the A record of `name`. -> (ip or "", status)
+    status: ok | nxdomain | noanswer | timeout | error"""
+    timeout = DNS_TIMEOUT if timeout is None else timeout
+    port = DNS_PORT if port is None else port
+    try:
+        qname = _dns_name(name)
+    except (ValueError, UnicodeError):
+        return "", "error"
+    tid = random.randint(0, 0xFFFF)
+    packet = struct.pack(">HHHHHH", tid, 0x0100, 1, 0, 0, 0) + qname + struct.pack(">HH", 1, 1)
+    try:
+        family = socket.AF_INET6 if ":" in server else socket.AF_INET
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            for _attempt in range(2):
+                sock.sendto(packet, (server, port))
+                try:
+                    while True:
+                        data, _ = sock.recvfrom(1500)
+                        if len(data) >= 12 and struct.unpack(">H", data[:2])[0] == tid:
+                            break
+                    break
+                except socket.timeout:
+                    data = None
+            if data is None:
+                return "", "timeout"
+    except OSError:
+        return "", "error"
+    try:
+        _, flags, qd, an, _, _ = struct.unpack(">HHHHHH", data[:12])
+        rcode = flags & 0x0F
+        if rcode == 3:
+            return "", "nxdomain"
+        if rcode != 0:
+            return "", "error"
+        pos = 12
+        for _ in range(qd):
+            pos = _dns_skip_name(data, pos) + 4
+        for _ in range(an):
+            pos = _dns_skip_name(data, pos)
+            rtype, _, _, rdlen = struct.unpack(">HHIH", data[pos:pos + 10])
+            pos += 10
+            if rtype == 1 and rdlen == 4:
+                return socket.inet_ntoa(data[pos:pos + 4]), "ok"
+            pos += rdlen
+        return "", "noanswer"
+    except (ValueError, struct.error, OSError):
+        return "", "error"
+
+
+def computer_fqdn(name, domain):
+    name = name.strip().lower()
+    return name if "." in name else "%s.%s" % (name, domain.strip(".").lower())
+
+
+def resolve_company(cid):
+    """Look up every AD computer of a company in its own DNS (the DC). Returns a summary."""
+    from concurrent.futures import ThreadPoolExecutor
+    comp = snapshot().by_id.get(int(cid))
+    if not comp:
+        return None
+    dc, domain, names = comp.get("dc_ip") or "", comp.get("domain") or "", list(comp["computers"])
+    ts = now_iso()
+    if not dc or not domain:
+        status, found, results = "not_configured", 0, []
+    else:
+        _, probe = dns_query_a(dc, domain)
+        if probe in ("timeout", "error"):
+            status, found, results = "unreachable", 0, []
+        else:
+            with ThreadPoolExecutor(max_workers=16) as ex:
+                results = list(ex.map(lambda n: (n, dns_query_a(dc, computer_fqdn(n, domain))[0]), names))
+            found = sum(1 for _, ip in results if ip)
+            status = "ok"
+    with write_db() as c:
+        for n, ip in results:
+            c.execute("""INSERT INTO computer_ips (company_id, name, dns_ip, dns_at) VALUES (?,?,?,?)
+                         ON CONFLICT(company_id, name) DO UPDATE SET dns_ip=excluded.dns_ip, dns_at=excluded.dns_at""",
+                      (comp["id"], n, ip, ts))
+        # status columns only: does not bump the edit revision
+        c.execute("UPDATE companies SET dns_status=?, dns_checked_at=?, dns_found=? WHERE id=?",
+                  (status, ts, found, comp["id"]))
+    return {"status": status, "checkedAt": ts, "found": found, "total": len(names), "dc": dc}
+
+
+def dns_loop():
+    time.sleep(5)
+    while True:
+        for comp in list(snapshot().companies):
+            if comp.get("dc_ip") and comp.get("domain") and comp["computers"]:
+                try:
+                    resolve_company(comp["id"])
+                except Exception:
+                    traceback.print_exc()
+        time.sleep(max(60, DNS_INTERVAL))
 
 
 # ── Admin account & sessions ─────────────────────────────────────────────────
@@ -1250,6 +1454,7 @@ class Handler(BaseHTTPRequestHandler):
 # ── Public endpoints (extension + Chrome updater) ────────────────────────────
 
 _DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{4,80}$")
+_COMPUTER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _VERSION_RE = re.compile(r"^\d{1,5}(\.\d{1,5}){0,3}$")
 
 
@@ -1267,29 +1472,31 @@ def _checkin(h, kind):
     if not _VERSION_RE.match(ver):
         ver = ""
     ua = str(body.get("userAgent", ""))[:300]
+    # Windows computer name, set by IT through Chrome's extension policy (2.4.0+).
+    computer = str(body.get("computerName", "")).strip()[:64]
+    if not _COMPUTER_RE.match(computer):
+        computer = ""
     ip = h.client_ip()
     ts = now_iso()
     with write_db() as c:
-        row = c.execute("SELECT device_id, company_id FROM devices WHERE device_id=?", (did,)).fetchone()
+        row = c.execute("SELECT device_id, company_id, computer_name FROM devices WHERE device_id=?", (did,)).fetchone()
         if row:
-            if kind == "enroll":
-                c.execute("""UPDATE devices SET version=?, user_agent=COALESCE(NULLIF(?, ''), user_agent),
-                                 last_seen=?, last_ip=?, enroll_count=enroll_count+1 WHERE device_id=?""",
-                          (ver, ua, ts, ip, did))
-            else:
-                c.execute("""UPDATE devices SET version=?, user_agent=COALESCE(NULLIF(?, ''), user_agent),
-                                 last_seen=?, last_ip=?, beats=beats+1 WHERE device_id=?""",
-                          (ver, ua, ts, ip, did))
+            counter = "enroll_count=enroll_count+1" if kind == "enroll" else "beats=beats+1"
+            c.execute("""UPDATE devices SET version=?, user_agent=COALESCE(NULLIF(?, ''), user_agent),
+                             computer_name=COALESCE(NULLIF(?, ''), computer_name),
+                             last_seen=?, last_ip=?, %s WHERE device_id=?""" % counter,
+                      (ver, ua, computer, ts, ip, did))
             pinned = row["company_id"]
+            computer = computer or row["computer_name"] or ""
         else:
             if not NEW_DEVICES_PER_IP.hit(ip):
                 raise HTTPError(429, "too many new devices from this address", {"retryAfter": 600})
             c.execute("""INSERT INTO devices (device_id, version, user_agent, first_seen, last_seen, last_ip,
-                                              enroll_count, beats) VALUES (?,?,?,?,?,?,?,?)""",
-                      (did, ver, ua, ts, ts, ip, 1 if kind == "enroll" else 0, 0 if kind == "enroll" else 1))
+                                              enroll_count, beats, computer_name) VALUES (?,?,?,?,?,?,?,?,?)""",
+                      (did, ver, ua, ts, ts, ip, 1 if kind == "enroll" else 0, 0 if kind == "enroll" else 1, computer))
             pinned = None
     snap = snapshot()
-    company, how, _ = snap.match(ip, pinned)
+    company, how, _ = snap.match(ip, pinned, computer)
     eff = snap.effective(company)
     h.json(200, {
         "ok": True,
@@ -1323,12 +1530,12 @@ def r_request_access(h):
     if not REQUEST_PER_IP.hit(ip) or (did and not REQUEST_PER_DEVICE.hit(did)):
         raise HTTPError(429, "too many requests", {"retryAfter": 600})
     with read_db() as c:
-        dev = c.execute("SELECT company_id, label FROM devices WHERE device_id=?", (did,)).fetchone()
+        dev = c.execute("SELECT company_id, label, computer_name FROM devices WHERE device_id=?", (did,)).fetchone()
     if not dev:
         # Only enrolled browsers may file requests; the extension enrolls on install.
         raise HTTPError(403, "unknown device")
     snap = snapshot()
-    company, _, _ = snap.match(ip, dev["company_id"])
+    company, _, _ = snap.match(ip, dev["company_id"], dev["computer_name"])
     cid = company["id"] if company else None
     ts = now_iso()
     with write_db() as c:
@@ -1344,7 +1551,7 @@ def r_request_access(h):
                 raise HTTPError(429, "request queue is full", {"retryAfter": 3600})
             c.execute("""INSERT INTO requests (domain, url, device_id, label, ts, status, company_id, hits, last_ts, ip)
                          VALUES (?,?,?,?,?, 'pending', ?, 1, ?, ?)""",
-                      (domain, url, did, dev["label"] or "", ts, cid, ts, ip))
+                      (domain, url, did, dev["label"] or dev["computer_name"] or "", ts, cid, ts, ip))
     h.json(200, {"ok": True, "domain": domain})
 
 
@@ -1451,7 +1658,7 @@ def _all_devices(c):
 
 def _decorate_devices(devs, snap, now_ts):
     for d in devs:
-        comp, how, cands = snap.match(d.get("last_ip"), d.get("company_id"))
+        comp, how, cands = snap.match(d.get("last_ip"), d.get("company_id"), d.get("computer_name"))
         d["company"] = comp["name"] if comp else None
         d["company_id_effective"] = comp["id"] if comp else None
         d["match"] = how
@@ -1481,14 +1688,23 @@ def r_overview(h):
                                    "mode": snap.effective(comp)["enforceMode"],
                                    "override": comp["policy_mode"] in MODES or bool(comp["whitelist"] or comp["blacklist"])}
     unmatched = ambiguous = 0
+    named = {}
     for d in devs:
         cid = d["company_id_effective"]
         if cid in per_company:
             per_company[cid]["devices"] += 1
             per_company[cid]["online"] += 1 if d["online"] else 0
+            if d.get("computer_name"):
+                named.setdefault(cid, set()).add(d["computer_name"].lower())
+            else:
+                per_company[cid]["unnamed"] = per_company[cid].get("unnamed", 0) + 1
         else:
             unmatched += 1
             ambiguous += 1 if d["match"] == "ambiguous" else 0
+    for comp in snap.companies:
+        pc = per_company[comp["id"]]
+        listed = {n.lower() for n in comp["computers"]}
+        pc["covered"] = min(len(listed), len(named.get(comp["id"], set()) & listed) + pc.pop("unnamed", 0))
     seen_24h = sum(1 for d in devs if now_ts - iso_to_ts(d.get("first_seen")) < 86400)
     h.json(200, {
         "ok": True, "now": now_iso(),
@@ -1595,10 +1811,17 @@ def _company_summary(comp, snap, devs):
     on = sum(1 for d in mine if d["online"])
     last = max((d.get("last_seen") or "" for d in mine), default="")
     versions = Counter(d.get("version") or "unknown" for d in mine)
+    # Coverage: AD computers that run the extension. Exact when browsers report
+    # their computer name (2.4.0 + policy); otherwise estimated from the browser count.
+    listed = {n.lower() for n in comp["computers"]}
+    named = {d["computer_name"].lower() for d in mine if d.get("computer_name")} & listed
+    unnamed = sum(1 for d in mine if not d.get("computer_name"))
+    covered = min(len(listed), len(named) + unnamed)
     return {
         "id": comp["id"], "name": comp["name"], "domain": comp["domain"], "dc_ip": comp["dc_ip"],
         "subnet": comp["subnet"], "nat_ips": comp["nat_ips"], "notes": comp["notes"],
         "adComputers": len(comp["computers"]), "devices": len(mine), "online": on, "lastSeen": last,
+        "covered": covered,
         "versions": sorted(([v, n] for v, n in versions.items()), key=lambda x: version_key(x[0]), reverse=True),
         "policy": {"mode": comp["policy_mode"], "whitelist": len(comp["whitelist"]),
                    "blacklist": len(comp["blacklist"]), "effectiveMode": eff["enforceMode"],
@@ -1631,29 +1854,49 @@ def r_company(h, cid):
     snap = snapshot()
     with read_db() as c:
         devs = _decorate_devices(_all_devices(c), snap, time.time())
-        reqs = [dict(r) for r in c.execute(
-            "SELECT * FROM requests WHERE company_id=? AND status='pending' ORDER BY last_ts DESC LIMIT 100", (comp["id"],))]
+        ips = {r["name"].lower(): dict(r) for r in c.execute("SELECT * FROM computer_ips WHERE company_id=?", (comp["id"],))}
+        row = c.execute("SELECT dns_status, dns_checked_at, dns_found FROM companies WHERE id=?", (comp["id"],)).fetchone()
     s = _company_summary(comp, snap, devs)
-    eff = snap.effective(comp)
-    gwl, gbl = set(text_domains(snap.policy["whitelist"])), set(text_domains(snap.policy["blacklist"]))
+    mine = [d for d in devs if d["company_id_effective"] == comp["id"]]
+    by_pc = {}
+    for d in mine:
+        if d.get("computer_name"):
+            by_pc.setdefault(d["computer_name"].lower(), []).append(d)
+
+    def entry(name, listed):
+        rec = ips.get(name.lower(), {})
+        browsers = by_pc.get(name.lower(), [])
+        ip = rec.get("dns_ip") or rec.get("manual_ip") or ""
+        return {
+            "name": name, "listed": listed,
+            "ip": ip, "ipSource": "dns" if rec.get("dns_ip") else ("manual" if ip else ""),
+            "manualIp": rec.get("manual_ip") or "",
+            "status": ("online" if any(b["online"] for b in browsers) else "offline") if browsers else "none",
+            "browsers": len(browsers),
+            "version": max((b.get("version") or "" for b in browsers), key=version_key, default=""),
+            "lastSeen": max((b.get("last_seen") or "" for b in browsers), default=""),
+        }
+
+    listed = [entry(n, True) for n in comp["computers"]]
+    known = {n.lower() for n in comp["computers"]}
+    extra = [entry(by_pc[k][0]["computer_name"], False) for k in by_pc if k not in known]
     s.update({
         "computers": comp["computers"],
-        "deviceList": [d for d in devs if d["company_id_effective"] == comp["id"]],
-        "requests": reqs,
-        "policyDetail": {
-            "mode": comp["policy_mode"], "whitelist": comp["whitelist"], "blacklist": comp["blacklist"],
-            "effective": {
-                "mode": eff["enforceMode"], "modeSource": eff["modeSource"], "truncated": eff["truncated"],
-                "whitelist": [{"d": d, "src": "company" if d in comp["whitelist"] else "global"} for d in eff["whitelist"]],
-                "blacklist": [{"d": d, "src": "company" if d in comp["blacklist"] else "global"} for d in eff["blacklist"]],
-                "overridden": {
-                    "whitelist": sorted(gwl & set(comp["blacklist"])),
-                    "blacklist": sorted(gbl & set(comp["whitelist"])),
-                },
-            },
-        },
+        "computerList": listed + extra,
+        "unnamedBrowsers": sum(1 for d in mine if not d.get("computer_name")),
+        "dns": {"status": row["dns_status"] or "", "checkedAt": row["dns_checked_at"] or "",
+                "found": row["dns_found"] or 0, "total": len(comp["computers"]),
+                "configured": bool(comp["dc_ip"] and comp["domain"])},
+        "manualIps": {k: v["manual_ip"] for k, v in ips.items() if v.get("manual_ip")},
     })
     h.json(200, {"ok": True, "company": s, "globalPolicy": {"mode": snap.policy["enforceMode"]}})
+
+
+@route("POST", r"/api/companies/(\d+)/resolve")
+def r_company_resolve(h, cid):
+    _company_or_404(cid)
+    res = resolve_company(cid)
+    h.json(200, {"ok": True, "dns": res})
 
 
 @route("POST", "/api/companies")
@@ -1668,6 +1911,8 @@ def r_company_create(h):
     except sqlite3.IntegrityError:
         raise HTTPError(409, "a company with this name already exists", {"fields": {"name": "already exists"}})
     invalidate()
+    if clean.get("computers") and clean.get("dc_ip") and clean.get("domain"):
+        threading.Thread(target=resolve_company, args=(cid,), daemon=True).start()
     h.json(200, {"ok": True, "id": cid})
 
 
@@ -1690,6 +1935,8 @@ def r_company_update(h, cid):
     except sqlite3.IntegrityError:
         raise HTTPError(409, "a company with this name already exists", {"fields": {"name": "already exists"}}) from None
     invalidate()
+    if any(k in clean for k in ("computers", "dc_ip", "domain")):
+        threading.Thread(target=resolve_company, args=(comp["id"],), daemon=True).start()
     h.json(200, {"ok": True})
 
 
@@ -1723,6 +1970,7 @@ def r_company_delete(h, cid):
     comp = _company_or_404(cid)
     with write_db() as c:
         c.execute("DELETE FROM companies WHERE id=?", (comp["id"],))
+        c.execute("DELETE FROM computer_ips WHERE company_id=?", (comp["id"],))
         c.execute("UPDATE devices SET company_id=NULL WHERE company_id=?", (comp["id"],))
         c.execute("UPDATE requests SET company_id=NULL WHERE company_id=? AND status='pending'", (comp["id"],))
         audit(c, h.user["username"], "company.delete", comp["name"], None, h.client_ip())
@@ -1800,10 +2048,15 @@ def r_company_import(h):
 
 @route("GET", "/api/companies/export")
 def r_company_export(h):
+    with read_db() as c:
+        manual = {(r["company_id"], r["name"].lower()): r["manual_ip"]
+                  for r in c.execute("SELECT company_id, name, manual_ip FROM computer_ips WHERE manual_ip<>''")}
     out = []
     for comp in snapshot().companies:
+        pcs = [("%s %s" % (n, manual[(comp["id"], n.lower())])) if (comp["id"], n.lower()) in manual else n
+               for n in comp["computers"]]
         out.append({"name": comp["name"], "domain": comp["domain"], "dc_ip": comp["dc_ip"],
-                    "subnet": comp["subnet"], "nat_ips": comp["nat_ips"], "computers": comp["computers"],
+                    "subnet": comp["subnet"], "nat_ips": comp["nat_ips"], "computers": pcs,
                     "notes": comp["notes"], "policy_mode": comp["policy_mode"],
                     "whitelist": comp["whitelist"], "blacklist": comp["blacklist"]})
     body = json.dumps(out, ensure_ascii=False, indent=2).encode("utf-8")
@@ -2073,7 +2326,7 @@ def cmd_migrate_check(src):
             pending = c.execute("SELECT COUNT(*) FROM requests WHERE status='pending'").fetchone()[0]
         counts = Counter()
         for d in devs:
-            comp, how, _ = snap.match(d.get("last_ip"), d.get("company_id"))
+            comp, how, _ = snap.match(d.get("last_ip"), d.get("company_id"), d.get("computer_name"))
             counts[how] += 1
         print("Companies after upgrade: %d" % len(snap.companies))
         print("Devices: %d (matched by NAT %d, subnet %d, pinned %d, ambiguous %d, no company %d)"
@@ -2127,6 +2380,9 @@ def main(argv):
         tls_srv.socket = ctx.wrap_socket(tls_srv.socket, server_side=True)
         threading.Thread(target=tls_srv.serve_forever, daemon=True).start()
         print("HTTPS:      https://%s:%d" % (HOST, tls_port))
+    if DNS_INTERVAL > 0:
+        threading.Thread(target=dns_loop, daemon=True).start()
+        print("AD DNS:     computer IPs refreshed every %d s from each company's DC" % max(60, DNS_INTERVAL))
     print(line)
     sys.stdout.flush()
     try:

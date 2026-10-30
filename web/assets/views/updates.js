@@ -33,7 +33,6 @@ export async function render(page, params, ctx) {
 
   function view(d) {
     const rel = d.release || {};
-    const updateUrl = location.origin + '/update_manifest.xml';
     const appid = d.appid;
     const fileInput = h('input', { type: 'file', accept: '.crx', class: 'hidden', onchange: () => { upload(fileInput.files[0]); fileInput.value = ''; } });
     const drop = h('div', { class: 'dropzone', role: 'button', tabindex: '0', onclick: () => fileInput.click(),
@@ -55,10 +54,6 @@ export async function render(page, params, ctx) {
         h('span', { class: 'field-hint' }, 'SHA-256'), h('span', { class: 'data', style: { fontSize: '12px' } }, rel.sha256.slice(0, 16) + '…'), copyBtn(rel.sha256)) : null]
       : empty('upload', t('Nothing published yet'), t('Devices keep the version they installed until you publish one here.'));
 
-    const maxV = Math.max(1, ...d.versions.map((v) => v[1]));
-    const winCmd = 'reg add "HKLM\\Software\\Policies\\Google\\Chrome\\ExtensionInstallForcelist" /v 1 /t REG_SZ /d "' + appid + ';' + updateUrl + '" /f';
-    const linuxJson = JSON.stringify({ ExtensionInstallForcelist: [appid + ';' + updateUrl] }, null, 2);
-    const code = (text) => h('pre', { class: 'code' }, text, copyBtn(text));
 
     return [
       h('div', { class: 'grid-2' },
@@ -72,28 +67,6 @@ export async function render(page, params, ctx) {
               h('li', null, t('Upload the .crx below.'))),
             drop,
             h('div', { class: 'field-hint' }, t('The server only accepts packages signed for this extension ID:'), ' ', h('span', { class: 'data' }, appid))))),
-      h('section', { class: 'panel', style: { marginTop: '20px' } },
-        h('div', { class: 'panel-head' }, h('h2', null, t('Versions in the fleet'))),
-        h('div', { class: 'panel-body' }, d.versions.length ? h('div', { class: 'bars' }, d.versions.map(([v, n]) => h('div', { class: 'bar-row' + (v === rel.version ? ' is-latest' : '') },
-          h('span', { class: 'label' }, v === 'unknown' ? t('unknown') : 'v' + v),
-          h('div', { class: 'track' }, h('div', { class: 'fill', style: { width: (n / maxV * 100) + '%' } })),
-          h('span', { class: 'value' }, num(n))))) : h('p', { class: 'muted' }, t('No browsers yet.')))),
-      h('section', { class: 'panel', style: { marginTop: '20px' } },
-        h('div', { class: 'panel-head' }, h('h2', null, t('Install on new computers')),
-          h('p', null, t('Auto-update works only for browsers where the extension is force-installed by policy. A “Load unpacked” copy never updates.'))),
-        h('div', { class: 'panel-body', style: { display: 'grid', gap: '14px' } },
-          h('div', { class: 'field' }, h('span', { class: 'field-label' }, t('Windows (run as administrator, then restart Chrome)')), code(winCmd)),
-          h('div', { class: 'field' }, h('span', { class: 'field-label' }, t('Linux: /etc/opt/chrome/policies/managed/url-fleet.json')), code(linuxJson)),
-          h('div', { class: 'field' }, h('span', { class: 'field-label' }, t('Group Policy or Google Admin console')),
-            h('p', { style: { margin: 0, color: 'var(--ink-2)' } }, t('Force-install extension ID {id} with update URL {url}.', { id: appid, url: updateUrl }))))),
-      d.history.length ? h('section', { class: 'panel', style: { marginTop: '20px' } },
-        h('div', { class: 'panel-head' }, h('h2', null, t('Release history'))),
-        h('div', { class: 'table-wrap', style: { marginTop: '10px' } }, h('table', { class: 'table' },
-          h('thead', null, h('tr', null, [t('Version'), t('Published'), t('Size'), t('By')].map((x) => h('th', null, x)))),
-          h('tbody', null, d.history.map((r) => h('tr', null,
-            h('td', null, h('b', null, 'v' + r.version)),
-            h('td', { title: r.uploaded_at ? dateTime(r.uploaded_at) : '' }, r.uploaded_at ? when(r.uploaded_at) : '—'),
-            h('td', null, kb(r.size)), h('td', null, r.by || '—'))))))) : null,
     ];
   }
 

@@ -89,24 +89,33 @@ export async function render(page, params, ctx) {
 
   const overrides = data.overrides.length
     ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
-      h('thead', null, h('tr', null, h('th', null, t('Company')), h('th', null, t('Mode')), h('th', null, t('Own allowed')), h('th', null, t('Own blocked')))),
+      h('thead', null, h('tr', null, h('th', null, t('Company')), h('th', null, t('Mode')), h('th', null, t('Own allowed')), h('th', null, t('Own blocked')), h('th', null, ''))),
       h('tbody', null, data.overrides.map((o) => h('tr', null,
-        h('td', null, h('a', { href: '#/companies/' + o.id + '/policy', style: { fontWeight: 700 } }, o.name)),
+        h('td', null, h('a', { href: '#/companies/' + o.id, style: { fontWeight: 700 } }, o.name)),
         h('td', null, plate(o.effectiveMode, { size: 'sm' }), o.mode === 'inherit' ? h('span', { class: 'plate-note' }, t('global mode')) : null),
         h('td', { class: 'num' }, num(o.whitelist)),
-        h('td', { class: 'num' }, num(o.blacklist)))))))
+        h('td', { class: 'num' }, num(o.blacklist)),
+        h('td', { class: 'actions' }, h('button', { class: 'btn btn--quiet btn--sm', type: 'button', onclick: async () => {
+          if (!await confirmDialog({ title: t('Remove the own rules of {company}?', { company: o.name }), body: t('The company goes back to the global policy. Its own mode and lists are deleted.'), confirm: t('Remove rules'), danger: true })) return;
+          try {
+            await post('/api/companies/' + o.id + '/policy', { mode: 'inherit', whitelist: [], blacklist: [] });
+            toast(t('{company} follows the global policy again.', { company: o.name }));
+            ctx.rerender();
+          } catch (e) { toast(errText(e), 'error'); }
+        } }, t('Back to global'))))))))
     : empty('building', t('Every company follows this policy'), t('Open a company and choose its own mode or lists when an office needs different rules.'));
 
   replace(page,
     h('header', { class: 'page-head' },
       h('div', { class: 'titles' }, h('h1', { class: 'page-title' }, t('Global policy')),
-        h('p', { class: 'page-sub' }, t('The default for every browser. A company can choose its own mode and add its own allowed or blocked sites — company entries win over global ones.')))),
+        h('p', { class: 'page-sub' }, t('The web-filtering rules every browser receives.')))),
     h('section', { class: 'panel' },
       h('div', { class: 'panel-head' }, h('h2', null, t('Mode')), h('p', null, t('Currently {mode}.', { mode: MODE_LABEL[data.policy.enforceMode]() }))),
       h('div', { class: 'panel-body' }, picker)),
     h('div', { class: 'grid-even', style: { marginTop: '20px' } }, allow.el, block.el),
     h('section', { class: 'panel', style: { marginTop: '20px' } },
-      h('div', { class: 'panel-head' }, h('h2', null, t('Companies with their own rules')), h('span', { class: 'badge' }, num(data.overrides.length))),
+      h('div', { class: 'panel-head' }, h('h2', null, t('Companies with their own rules')), h('span', { class: 'badge' }, num(data.overrides.length)),
+        h('p', null, t('Rules set earlier for single companies. They still apply; return a company to the global policy to remove them.'))),
       h('div', { class: 'panel-body' }, overrides)),
     saveHost);
 

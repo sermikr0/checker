@@ -174,6 +174,7 @@ export function meter(value, max, label) {
 export function matchInfo(d) {
   const map = {
     pinned: ['pin', t('Pinned manually')],
+    computer: ['monitor', t('By computer name')],
     nat: ['route', t('By NAT address')],
     subnet: ['subnet', t('By subnet')],
     ambiguous: ['alert', t('Several companies match')],

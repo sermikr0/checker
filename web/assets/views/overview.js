@@ -42,8 +42,7 @@ function view(o, ctx) {
   const head = h('section', { class: 'statement' });
   if (!d.total) {
     head.append(h('h1', null, t('No browsers have checked in yet')),
-      h('p', { class: 'page-sub' }, t('Install the extension with the force-install policy and devices will appear here within a minute.'), ' ',
-        h('a', { href: '#/updates' }, t('Show the install policy'))));
+      h('p', { class: 'page-sub' }, t('Install the extension with the force-install policy and devices will appear here within a minute.')));
   } else {
     head.append(h('h1', null,
       h('span', { class: 'num' }, num(d.online)),
@@ -86,7 +85,7 @@ function view(o, ctx) {
       h('td', null, h('a', { class: 'co-name', href: '#/companies/' + c.id }, c.name)),
       h('td', null, h('div', { class: 'lane-cell' }, lane(c.online, c.devices),
         h('span', { class: 'counts' }, c.devices ? [h('b', null, num(c.online)), ' ', t('online of {n}', { n: num(c.devices) })] : t('No devices yet')))),
-      h('td', null, c.adComputers ? meter(c.devices, c.adComputers, t('{n} of {m} AD computers', { n: num(c.devices), m: num(c.adComputers) })) : h('span', { class: 'muted' }, t('No AD list'))),
+      h('td', null, c.adComputers ? meter(c.covered, c.adComputers, t('{n} of {m} AD computers', { n: num(c.covered), m: num(c.adComputers) })) : h('span', { class: 'muted' }, t('No AD list'))),
       h('td', null, plate(c.mode, { size: 'sm' }), c.override ? h('span', { class: 'plate-note' }, t('own policy')) : null));
     return tr;
   });
