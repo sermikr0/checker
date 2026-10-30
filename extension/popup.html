@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>URL Safety Checker</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+
+    <header class="header">
+      <img class="logo" src="icons/icon48.png" alt="" width="28" height="28">
+      <div class="title">
+        <h1>URL Safety Checker</h1>
+        <p>Logistics edition · phishing, malware &amp; freight-scam protection</p>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" role="tab" data-tab="check">Check</button>
+      <button class="tab" role="tab" data-tab="page">This page</button>
+      <button class="tab" role="tab" data-tab="settings">Settings</button>
+    </nav>
+
+    <!-- Check -->
+    <section id="tab-check" class="tab-content">
+      <div id="access-warning" class="notice hidden">
+        <strong>Site access is restricted.</strong> The hover preview, link marking and domain lookups cannot run.
+        Fix: open <code>chrome://extensions</code> → URL Safety Checker → <em>Details</em> → <em>Site access</em> → <strong>On all sites</strong>, then reload your tabs.
+      </div>
+      <div class="input-group">
+        <input type="text" id="url-input" placeholder="Paste a link (hxxp and [.] are understood)" autocomplete="off" spellcheck="false" aria-label="URL to check">
+        <button id="paste-btn" class="icon-btn" title="Paste from clipboard" aria-label="Paste from clipboard">📋</button>
+      </div>
+      <button id="check-btn" class="btn-primary">
+        <span id="btn-text">Check link</span>
+        <span id="spinner" class="spinner hidden" aria-hidden="true"></span>
+      </button>
+
+      <div id="result" class="hidden">
+        <div id="verdict-box" class="verdict-box UNKNOWN">
+          <div id="verdict-icon" class="verdict-icon">❓</div>
+          <div class="verdict-info">
+            <div id="verdict-label" class="verdict-label">—</div>
+            <div id="verdict-url" class="verdict-url"></div>
+          </div>
+          <div id="risk-badge" class="risk-badge">0</div>
+        </div>
+
+        <div class="bar-wrap">
+          <div class="bar-labels"><span>Risk score</span><span id="bar-score">0 / 100</span></div>
+          <div class="bar-bg"><div id="risk-bar" class="risk-bar"></div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Findings</div>
+          <ul id="issues-list" class="issues-list"></ul>
+        </div>
+
+        <div id="redirect-section" class="section hidden">
+          <div class="section-title">Where it actually goes</div>
+          <div id="redirect-chain" class="redirect-chain"></div>
+        </div>
+
+        <div id="details-grid" class="details-grid"></div>
+        <div id="checks-line" class="checks-line"></div>
+      </div>
+    </section>
+
+    <!-- This page -->
+    <section id="tab-page" class="tab-content hidden">
+      <p class="hint">Analyzes every link on the current tab with the address rules (no network requests).</p>
+      <button id="scan-page-btn" class="btn-primary">Scan links on this page</button>
+      <div id="page-stats" class="hidden">
+        <div class="stats-grid">
+          <div class="stat-card SAFE"><div id="cnt-safe">0</div><div>Safe</div></div>
+          <div class="stat-card CAUTION"><div id="cnt-caution">0</div><div>Caution</div></div>
+          <div class="stat-card SUSPICIOUS"><div id="cnt-suspicious">0</div><div>Suspicious</div></div>
+          <div class="stat-card DANGEROUS"><div id="cnt-dangerous">0</div><div>Dangerous</div></div>
+        </div>
+        <div id="page-links-list" class="link-list"></div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings" class="tab-content hidden">
+      <div id="update-banner" style="background:#16351f;border:1px solid #22c55e88;color:#86efac;border-radius:9px;padding:11px 12px;margin-bottom:12px;font-weight:800;font-size:13.5px;text-align:center;letter-spacing:.3px">
+        ✅ UPDATED — NEW VERSION <span id="ub-ver"></span>
+      </div>
+      <div id="managed-notice" class="hint hidden" style="margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+        🛡️ Managed by your organization · <code id="managed-server">—</code>
+      </div>
+
+      <div class="settings-group toggle-group">
+        <label for="hover-preview">Hover preview on links</label>
+        <label class="toggle"><input type="checkbox" id="hover-preview" checked><span class="slider"></span></label>
+      </div>
+      <div class="settings-group toggle-group">
+        <label for="mark-links">Mark risky links on web pages <span class="muted">(outline + red dot, badge count)</span></label>
+        <label class="toggle"><input type="checkbox" id="mark-links" checked><span class="slider"></span></label>
+      </div>
+      <div class="settings-group toggle-group">
+        <label for="active-fetch">Live check: open the link from this browser <span class="muted warn">Visits the link, which can confirm your email address to an attacker or use up a one-time link. Leave off unless you need to see redirects or downloads.</span></label>
+        <label class="toggle"><input type="checkbox" id="active-fetch"><span class="slider"></span></label>
+      </div>
+
+      <div class="settings-group">
+        <label for="vt-key">VirusTotal API key <span class="muted">(URL reputation — lookup only, never submitted)</span></label>
+        <input type="password" id="vt-key" placeholder="optional — paste your VirusTotal key" autocomplete="off" spellcheck="false">
+      </div>
+
+      <button id="save-settings" class="btn-primary">Save settings</button>
+      <div id="settings-saved" class="save-msg hidden">Saved</div>
+    </section>
+
+  </div>
+  <script src="analyzer.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

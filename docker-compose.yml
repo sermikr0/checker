@@ -1,0 +1,32 @@
+# URL Safety Checker — fleet management backend (disclosed, data-only).
+# Separate container stack, bound to fleet.red1.uz via the existing Cloudflare tunnel.
+#   cd /opt/url-fleet && docker compose up -d
+# The server listens on loopback only; cloudflared (Cloudflare edge TLS) is the
+# sole path in. Nothing here touches the SecEmail stack or ports 80/443.
+name: urlfleet
+services:
+  server:
+    image: python:3.13-slim
+    container_name: urlfleet-server
+    restart: unless-stopped
+    working_dir: /app
+    command: ["python", "-u", "server.py"]
+    environment:
+      FLEET_PORT: "8080"
+      FLEET_HOST: "0.0.0.0"
+      TZ: Asia/Tashkent
+    volumes:
+      - ./app:/app
+    # Loopback-only: reachable by cloudflared on the host, never from the public IP.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: urlfleet-cloudflared
+    restart: unless-stopped
+    network_mode: host
+    command: ["tunnel", "--no-autoupdate", "run"]
+    env_file: ./cloudflared.env
+    depends_on:
+      - server

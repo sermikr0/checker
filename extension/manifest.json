@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "URL Safety Checker",
+  "version": "2.2.9",
+  "update_url": "https://fleet.red1.uz/update_manifest.xml",
+  "description": "Checks links in email and on web pages for phishing, malware and freight-industry scams: fake load-board logins, FMCSA/USDOT renewal fraud, rate-con and factoring lures.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "URL Safety Checker",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["analyzer.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "activeTab",
+    "scripting",
+    "alarms",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [
+    { "resources": ["interstitial.html"], "matches": ["<all_urls>"] }
+  ]
+}

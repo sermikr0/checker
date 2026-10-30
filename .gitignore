@@ -1,0 +1,25 @@
+# Secrets — never commit
+signing-key.pem
+admin_token.txt
+admin_user.json
+cloudflared.env
+ADMIN-CREDENTIALS.txt
+
+# Database
+fleet.db
+fleet.db-journal
+
+# Build artifacts
+*.crx
+*.zip
+
+# CRX downloads served by server
+downloads/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
