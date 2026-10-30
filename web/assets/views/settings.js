@@ -85,7 +85,8 @@ export async function render(page, params, ctx) {
 function rdpPanel() {
   const origin = window.location.origin;
   const linux = 'curl -fsSL ' + origin + '/tools/fleet-rdp/install.sh | FLEET_SERVER=' + origin + ' bash';
-  const windows = 'powershell -ExecutionPolicy Bypass -Command "$env:FLEET_SERVER=\'' + origin + '\'; irm ' + origin + '/tools/fleet-rdp/install-windows.ps1 | iex"';
+  // no "$" inside: works pasted into cmd and into PowerShell
+  const windows = 'powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm ' + origin + '/tools/fleet-rdp/install-windows.ps1))) -Server ' + origin + '"';
   const isWin = /Windows/i.test(navigator.userAgent || '');
   const block = (label, cmd, hint) => h('div', { class: 'field' }, h('span', { class: 'field-label' }, label),
     h('pre', { class: 'code' }, cmd, copyBtn(cmd)), h('div', { class: 'field-hint' }, hint));

@@ -67,21 +67,24 @@ function Test-Reachable([string[]]$Ips) {
       if ($t.Status -eq 'RanToCompletion' -and $t.Result.Status -eq 'Success') { $up[$ip] = $true }
     }
   }
-  $conns = @()
-  foreach ($ip in $Ips) {
-    if ($up.ContainsKey($ip)) { continue }
-    foreach ($port in 445, 3389, 135) {
-      try {
-        $client = New-Object System.Net.Sockets.TcpClient
-        $conns += , @($ip, $client, $client.ConnectAsync($ip, $port))
-      } catch {}
+  # TCP for the rest, 200 hosts (600 sockets) at a time
+  $rest = @($Ips | Where-Object { -not $up.ContainsKey($_) } | Select-Object -Unique)
+  for ($i = 0; $i -lt $rest.Count; $i += 200) {
+    $conns = @()
+    foreach ($ip in $rest[$i..([Math]::Min($i + 199, $rest.Count - 1))]) {
+      foreach ($port in 445, 3389, 135) {
+        try {
+          $client = New-Object System.Net.Sockets.TcpClient
+          $conns += , @($ip, $client, $client.ConnectAsync($ip, $port))
+        } catch {}
+      }
     }
-  }
-  if ($conns.Count) {
-    try { [void][System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($conns | ForEach-Object { $_[2] }), 3000) } catch {}
-    foreach ($x in $conns) {
-      if ($x[2].Status -eq 'RanToCompletion' -and $x[1].Connected) { $up[$x[0]] = $true }
-      try { $x[1].Close() } catch {}
+    if ($conns.Count) {
+      try { [void][System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($conns | ForEach-Object { $_[2] }), 3000) } catch {}
+      foreach ($x in $conns) {
+        if ($x[2].Status -eq 'RanToCompletion' -and $x[1].Connected) { $up[$x[0]] = $true }
+        try { $x[1].Close() } catch {}
+      }
     }
   }
   return $up
@@ -128,44 +131,46 @@ function Invoke-Report {
 function Set-FleetGpo([string]$ServerUrl) {
   Import-Module GroupPolicy -ErrorAction Stop
   $domain = Get-ADDomain
-  $gpo = Get-GPO -Name $GpoName -ErrorAction SilentlyContinue
+  $gpo = Get-GPO -All | Where-Object { $_.DisplayName -eq $GpoName } | Select-Object -First 1
   if (-not $gpo) {
     $gpo = New-GPO -Name $GpoName -Comment 'URL Safety Checker extension: force-install from the fleet server, computerName policy.'
   }
   $linked = @((Get-GPInheritance -Target $domain.DistinguishedName).GpoLinks | Where-Object { $_.DisplayName -eq $GpoName })
   if (-not $linked) { New-GPLink -Guid $gpo.Id -Target $domain.DistinguishedName -LinkEnabled Yes | Out-Null }
 
-  # 1) Force-install entry. An existing entry for this extension (in any GPO) is
-  #    pointed at the fleet update URL; otherwise one is added to our GPO.
+  # 1) Force-install entry. A GPO that sets this list through the Chrome ADMX
+  #    template replaces the whole list (lists do not merge across GPOs), so the
+  #    entry goes into our GPO AND into every GPO that already sets the list;
+  #    existing entries for this extension are pointed at the fleet update URL.
   $key = 'HKLM\Software\Policies\Google\Chrome\ExtensionInstallForcelist'
   $entry = "$AppId;$ServerUrl/update_manifest.xml"
   $used = @{}
-  $found = @()
+  $lists = @{}          # GPO id -> @{ Gpo; Entries = @(@{ Name; Value }) }
   foreach ($g in Get-GPO -All) {
     $vals = @()
     try { $vals = @(Get-GPRegistryValue -Guid $g.Id -Key $key -ErrorAction Stop) } catch {}
     foreach ($v in $vals) {
       if (-not $v.ValueName) { continue }
       $used[[string]$v.ValueName] = $true
-      if ([string]$v.Value -like "$AppId;*") {
-        $found += [pscustomobject]@{ Gpo = $g; Name = [string]$v.ValueName; Value = [string]$v.Value }
-      }
+      if (-not $lists.ContainsKey($g.Id)) { $lists[$g.Id] = @{ Gpo = $g; Entries = @() } }
+      $lists[$g.Id].Entries += , @{ Name = [string]$v.ValueName; Value = [string]$v.Value }
     }
   }
-  if ($found) {
-    foreach ($f in $found) {
-      if ($f.Value -ne $entry) {
-        Set-GPRegistryValue -Guid $f.Gpo.Id -Key $key -ValueName $f.Name -Type String -Value $entry | Out-Null
-        Write-Log ("force-install entry in '{0}' now points to {1}" -f $f.Gpo.DisplayName, $entry)
-      } else {
-        Write-Log ("force-install entry already set in '{0}'" -f $f.Gpo.DisplayName)
+  if (-not $lists.ContainsKey($gpo.Id)) { $lists[$gpo.Id] = @{ Gpo = $gpo; Entries = @() } }
+  $free = 1
+  while ($used.ContainsKey([string]$free)) { $free++ }
+  foreach ($l in $lists.Values) {
+    $mine = @($l.Entries | Where-Object { $_.Value -like "$AppId;*" })
+    if (-not $mine) {
+      Set-GPRegistryValue -Guid $l.Gpo.Id -Key $key -ValueName ([string]$free) -Type String -Value $entry | Out-Null
+      Write-Log ("force-install entry added to '{0}': {1}" -f $l.Gpo.DisplayName, $entry)
+    }
+    foreach ($m in $mine) {
+      if ($m.Value -ne $entry) {
+        Set-GPRegistryValue -Guid $l.Gpo.Id -Key $key -ValueName $m.Name -Type String -Value $entry | Out-Null
+        Write-Log ("force-install entry in '{0}' now points to {1}" -f $l.Gpo.DisplayName, $entry)
       }
     }
-  } else {
-    $n = 1
-    while ($used.ContainsKey([string]$n)) { $n++ }
-    Set-GPRegistryValue -Guid $gpo.Id -Key $key -ValueName ([string]$n) -Type String -Value $entry | Out-Null
-    Write-Log "force-install entry added to '$GpoName': $entry"
   }
 
   # 2) The extension's computerName policy; Group Policy Preferences put each PC's own name in.

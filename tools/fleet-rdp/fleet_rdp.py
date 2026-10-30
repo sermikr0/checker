@@ -30,7 +30,7 @@ import sys
 from urllib.parse import parse_qs, urlsplit
 
 HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
-USER_RE = re.compile(r"^[A-Za-z0-9._@\\][A-Za-z0-9 ._@\\-]{0,103}$")
+USER_RE = re.compile(r"^[\w.@\\][\w .@\\-]{0,103}$")
 CONF_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "fleet-rdp")
 CONF_FILE = os.path.join(CONF_DIR, "credentials")
 LOG_FILE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "fleet-rdp.log")

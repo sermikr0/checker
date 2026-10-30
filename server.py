@@ -595,7 +595,7 @@ def unseal(blob):
 
 # ── Companies ────────────────────────────────────────────────────────────────
 
-_DC_USER_RE = re.compile(r"^[A-Za-z0-9._@\\][A-Za-z0-9 ._@\\-]{0,103}$")
+_DC_USER_RE = re.compile(r"^[\w.@\\][\w .@\\-]{0,103}$")
 
 
 def _str_list(value, max_items, max_len):
@@ -715,7 +715,7 @@ def validate_company(data, partial=True):
     if has("dc_user"):
         user = str(data.get("dc_user") or "").strip()
         if user and not _DC_USER_RE.match(user):
-            errors["dc_user"] = "use letters, digits and . _ - @ \\ only"
+            errors["dc_user"] = "use letters, digits, spaces and . _ - @ \\ only"
         clean["dc_user"] = user[:104]
     if "dc_password" in data:
         pw = data.get("dc_password")
@@ -2220,8 +2220,8 @@ def r_agent_report(h):
             c.execute("UPDATE companies SET agent_seen=?, agent_info=? WHERE id=?", (ts, json.dumps(old), cid))
         invalidate()
         return h.json(200, {"ok": True, "company": row["name"], "computers": None})
-    if not isinstance(items, list) or len(items) > 5000:
-        raise HTTPError(400, "computers must be a list (max 5000)")
+    if not isinstance(items, list) or len(items) > 20000:
+        raise HTTPError(400, "computers must be a list (max 20000)")
     clean = {}
     for it in items:
         if not isinstance(it, dict):

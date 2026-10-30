@@ -52,9 +52,10 @@ a one-line PowerShell command with the company's token. Run it as
 administrator on the DC. The same command also sets up the domain's
 **"URL Fleet - Chrome"** group policy:
 
-* force-install of the extension with the fleet update URL (an existing entry
-  for the extension in any GPO is pointed at that URL instead), so every
-  version uploaded in the dashboard reaches all browsers;
+* force-install of the extension with the fleet update URL — added to this GPO
+  and to every GPO that already sets the force-install list (such lists replace
+  each other instead of merging), existing entries for the extension are pointed
+  at that URL — so every version uploaded in the dashboard reaches all browsers;
 * the extension's `computerName` policy (`%ComputerName%`, Group Policy Preferences).
 
 Statuses on the Company page:
@@ -80,7 +81,7 @@ desktop shows the commands; the scripts are served by the fleet server:
 curl -fsSL https://fleet.red1.uz/tools/fleet-rdp/install.sh | FLEET_SERVER=https://fleet.red1.uz bash
 ```
 ```powershell
-powershell -ExecutionPolicy Bypass -Command "$env:FLEET_SERVER='https://fleet.red1.uz'; irm https://fleet.red1.uz/tools/fleet-rdp/install-windows.ps1 | iex"
+powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://fleet.red1.uz/tools/fleet-rdp/install-windows.ps1))) -Server https://fleet.red1.uz"
 ```
 
 * **Password per company** — Company → Details: *DC user name* and *DC

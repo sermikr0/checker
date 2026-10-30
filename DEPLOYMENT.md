@@ -121,7 +121,9 @@ It installs `C:\ProgramData\URLFleet\` (script, `agent.json` with the token,
 first report, and sets up the **URL Fleet - Chrome** GPO linked to the domain:
 
 * `ExtensionInstallForcelist`: `lddmakdihlenfbmdpggpahjooglgigoi;https://fleet.red1.uz/update_manifest.xml`
-  (an existing entry for this extension in any GPO is corrected instead of duplicated);
+  — in this GPO and in every other GPO that sets the force-install list (a GPO
+  made with the Chrome ADMX template replaces the whole list, so each one must
+  carry the entry); existing entries for this extension are pointed at that URL;
 * Preferences → Registry: `HKLM\Software\Policies\Google\Chrome\3rdparty\extensions\lddmakdihlenfbmdpggpahjooglgigoi\policy`,
   `computerName` = `%ComputerName%`.
 

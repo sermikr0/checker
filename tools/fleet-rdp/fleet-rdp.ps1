@@ -35,6 +35,12 @@ function Save-FleetCredential {
   $c | Export-Clixml -Path $CredFile   # DPAPI: only this Windows user can decrypt it
 }
 
+# Windows PowerShell 5.1 passes native arguments without escaping embedded
+# quotes; build the command line ourselves (MSVCRT rules).
+function ConvertTo-NativeArg([string]$Value) {
+  '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+
 function Test-PrivateIPv4([System.Net.IPAddress]$Ip) {
   if ($Ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { return $false }
   $b = $Ip.GetAddressBytes()
@@ -68,7 +74,7 @@ if ($linkPass) {
   # Password saved for this company in the dashboard
   $user = if ($query['user']) { [string]$query['user'] } else { 'Administrator' }
   $pass = $linkPass
-  if ($user -notmatch '^[A-Za-z0-9._@\\][A-Za-z0-9 ._@\\-]{0,103}$' -or $pass.Length -gt 256 -or $pass -match '[\x00-\x1f\x7f]') {
+  if ($user -notmatch '^[\w.@\\][\w .@\\-]{0,103}$' -or $pass.Length -gt 256 -or $pass -match '[\x00-\x1f\x7f]') {
     Show-Message 'Fleet RDP: invalid user name or password in the link'
     exit 1
   }
@@ -80,7 +86,8 @@ if ($linkPass) {
 }
 
 # Saved credential for this host, used by mstsc without asking.
-& cmdkey.exe "/generic:TERMSRV/$target" "/user:$user" "/pass:$pass" | Out-Null
+$cmdArgs = @("/generic:TERMSRV/$target", "/user:$user", "/pass:$pass" | ForEach-Object { ConvertTo-NativeArg $_ }) -join ' '
+Start-Process -FilePath "$env:WINDIR\System32\cmdkey.exe" -ArgumentList $cmdArgs -Wait -WindowStyle Hidden
 
 $rdp = Join-Path $env:TEMP ("fleet-rdp-" + $target + ".rdp")
 @(
@@ -91,5 +98,5 @@ $rdp = Join-Path $env:TEMP ("fleet-rdp-" + $target + ".rdp")
   'screen mode id:i:1',
   'redirectclipboard:i:1',
   'authentication level:i:2'
-) | Set-Content -Path $rdp -Encoding ASCII
+) | Set-Content -Path $rdp -Encoding Unicode   # UTF-16LE: mstsc's own .rdp format
 Start-Process -FilePath "$env:WINDIR\System32\mstsc.exe" -ArgumentList "`"$rdp`""
