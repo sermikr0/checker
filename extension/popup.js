@@ -7,6 +7,12 @@ const USC = globalThis.USC;
 const $ = (id) => document.getElementById(id);
 const ORDER = { d: 0, w: 1, i: 2, ok: 3 };
 const HISTORY_LIMIT = 50;
+// Text colours that stay readable on light and dark backgrounds (see popup.css).
+const TONE = {
+  SAFE: 'var(--accent-text)', CAUTION: 'var(--warn-text)', SUSPICIOUS: 'var(--warn-text)',
+  DANGEROUS: 'var(--danger-text)', UNKNOWN: 'var(--dim)',
+};
+const MODE_LABEL = { off: 'All sites open', blacklist: 'Blacklist', whitelist: 'Whitelist only' };
 
 let settings = { ...USC.DEFAULT_SETTINGS };
 let allow = new Set();
@@ -49,7 +55,7 @@ async function checkSiteAccess() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  const ub = $('ub-ver'); if (ub) ub.textContent = 'v' + USC.VERSION;
+  const ub = $('ub-ver'); if (ub) ub.textContent = 'Version ' + USC.VERSION;
   checkSiteAccess();
   await loadSettings();
   await loadHistory();
@@ -104,6 +110,11 @@ function setupListeners() {
     if (item) openInCheck(item.dataset.url);
   });
   $('save-settings').addEventListener('click', saveSettings);
+  $('clear-history').addEventListener('click', clearHistory);
+  $('history-list').addEventListener('click', (e) => {
+    const item = e.target.closest('[data-url]');
+    if (item) openInCheck(item.dataset.url);
+  });
 }
 
 function openInCheck(url) {
@@ -187,10 +198,10 @@ function render(r, net) {
 
   const score = r.riskScore || 0;
   els.riskBadge.textContent = String(score);
-  els.riskBadge.style.color = cfg.color;
+  els.riskBadge.title = `Risk score ${score} of 100`;
   els.barScore.textContent = `${score} / 100`;
   els.riskBar.style.width = score + '%';
-  els.riskBar.style.background = cfg.color;
+  els.riskBar.style.background = 'var(--' + String(r.verdict || 'UNKNOWN').toLowerCase() + ')';
 
   // Findings, most severe first
   els.issues.replaceChildren();
@@ -225,18 +236,18 @@ function render(r, net) {
   };
 
   if (!r.tags.includes('non-web')) {
-    detail('Encryption', r.https ? 'HTTPS' : 'Plain HTTP', r.https ? USC.VERDICTS.SAFE.color : USC.VERDICTS.DANGEROUS.color);
-    detail('Domain', r.registrable || r.host || '—', r.trusted ? USC.VERDICTS.SAFE.color : null);
+    detail('Encryption', r.https ? 'HTTPS' : 'Plain HTTP', r.https ? TONE.SAFE : TONE.DANGEROUS);
+    detail('Domain', r.registrable || r.host || '—', r.trusted ? TONE.SAFE : null);
   }
   if (r.domainAge != null) {
-    const ageColor = r.domainAge < 30 ? USC.VERDICTS.DANGEROUS.color : r.domainAge < 90 ? USC.VERDICTS.CAUTION.color : USC.VERDICTS.SAFE.color;
+    const ageColor = r.domainAge < 30 ? TONE.DANGEROUS : r.domainAge < 90 ? TONE.CAUTION : TONE.SAFE;
     detail('Domain age', `${USC.describeAge(r.domainAge)}${r.registered ? ` (${r.registered})` : ''}`, ageColor);
   }
-  if (r.statusCode) detail('HTTP status', String(r.statusCode), r.statusCode >= 400 ? USC.VERDICTS.SUSPICIOUS.color : USC.VERDICTS.SAFE.color);
-  if (r.brand) detail('Imitates', r.brand, USC.VERDICTS.DANGEROUS.color);
-  if (r.platform) detail('Hosting platform', r.platform, USC.VERDICTS.CAUTION.color);
-  if (r.vt && r.vt.known) detail('VirusTotal', `${r.vt.positives} of ${r.vt.total} vendors flag it`, r.vt.positives ? USC.VERDICTS.DANGEROUS.color : USC.VERDICTS.SAFE.color);
-  if (r.gsb) detail('Safe Browsing', r.gsb.matches ? 'Listed as unsafe' : 'Not listed', r.gsb.matches ? USC.VERDICTS.DANGEROUS.color : USC.VERDICTS.SAFE.color);
+  if (r.statusCode) detail('HTTP status', String(r.statusCode), r.statusCode >= 400 ? TONE.SUSPICIOUS : TONE.SAFE);
+  if (r.brand) detail('Imitates', r.brand, TONE.DANGEROUS);
+  if (r.platform) detail('Hosting platform', r.platform, TONE.CAUTION);
+  if (r.vt && r.vt.known) detail('VirusTotal', `${r.vt.positives} of ${r.vt.total} vendors flag it`, r.vt.positives ? TONE.DANGEROUS : TONE.SAFE);
+  if (r.gsb) detail('Safe Browsing', r.gsb.matches ? 'Listed as unsafe' : 'Not listed', r.gsb.matches ? TONE.DANGEROUS : TONE.SAFE);
   if (r.title) detail('Page title', r.title, null, true);
 
   // Which checks ran
@@ -358,9 +369,7 @@ function renderHistory() {
     row.appendChild(el('span', 'h-badge ' + item.verdict, cfg.label));
     row.appendChild(el('span', 'h-url', hostOf(item.url)));
     row.appendChild(el('span', 'h-time', new Date(item.ts).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })));
-    const score = el('span', 'h-score', String(item.score));
-    score.style.color = cfg.color;
-    row.appendChild(score);
+    row.appendChild(el('span', 'h-score', String(item.score)));
     listEl.appendChild(row);
   }
 }
@@ -392,10 +401,17 @@ async function loadSettings() {
 // show it plainly in Settings (server, device id, last check-in).
 async function showManagedNotice() {
   try {
-    const d = await chrome.storage.local.get(['managedServer', 'deviceId', 'managedLastSeen']);
+    const d = await chrome.storage.local.get(['managedServer', 'managedCompany', 'managedLastSeen', 'settings']);
     if (!d.managedServer) return;
-    $('managed-server').textContent = d.managedServer;
+    const mode = (d.settings && d.settings.enforceMode) || 'off';
+    $('managed-server').textContent = d.managedServer.replace(/^https?:\/\//, '');
+    $('managed-company').textContent = d.managedCompany || 'Not assigned yet';
+    const plate = el('span', 'mode-plate ' + mode, MODE_LABEL[mode] || mode);
+    $('managed-mode').replaceChildren(plate);
     $('managed-notice').classList.remove('hidden');
+    const chip = $('managed-chip');
+    chip.textContent = d.managedCompany || 'Managed';
+    chip.classList.remove('hidden');
   } catch (_) { /* ignore */ }
 }
 

@@ -12,7 +12,7 @@
  *   'd' danger, 'w' warning, 'i' information, 'ok' positive signal.
  */
 globalThis.USC = globalThis.USC || (() => {
-  const VERSION = '2.2.9';
+  const VERSION = '2.3.0';
 
   const DEFAULT_SETTINGS = Object.freeze({
     vtKey: '',

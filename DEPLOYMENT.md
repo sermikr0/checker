@@ -1,70 +1,113 @@
-# URL Safety Checker — Fleet deployment
+# Deployment
 
-Centralized **inventory + configuration** for the corporate build of the
-extension, with a disclosed management model (logistics managers are informed
-before enrollment; the extension shows a visible "managed by your organization"
-notice in Settings).
+The server is one Python file plus the `web/` folder. It needs no packages.
 
-## Pieces
+## Docker + Cloudflare Tunnel (current setup)
 
-| Piece | Where | What it does |
-|---|---|---|
-| `server.py` | `10.252.13.126:/home/ext/url-fleet/` | Backend: enroll, heartbeat, device list, config. Pure Python stdlib, no pip deps. |
-| `url-fleet.service` | systemd (installed) | Keeps the backend running + auto-starts on boot. |
-| Dashboard | `http://10.252.13.126:8080/` | Admin page: device inventory + central config. Token-gated. |
-| `url-safety-checker-2.1.0.zip` | this folder | The updated extension (v2.1.0) with enrollment + heartbeat. |
-
-**Admin token:** stored in `/home/ext/url-fleet/admin_token.txt` on the server
-(`CvmaacMco9lUCKYHy3a1cNrPeToIZZd3`). Open the dashboard and paste it to sign in.
-
-## What the extension sends (and does not)
-
-Sends on install + every 5 min: a random **device ID**, the **extension
-version**, and the **user-agent**. The server additionally records the **source
-IP** it sees (unavoidable for any network call).
-
-Does **not** send: browsing history, page contents, URLs the user checks, or any
-API keys. Does **not** download or run code from the server — the config it
-pulls is strictly data (allowlist + feature toggles) and is type-checked.
-
-## Server management
-
-```bash
-sudo systemctl status url-fleet      # state
-sudo systemctl restart url-fleet     # restart
-sudo journalctl -u url-fleet -f      # live logs
+```
+/opt/url-fleet/
+  docker-compose.yml
+  cloudflared.env          # TUNNEL_TOKEN=…   (never commit)
+  app/
+    server.py
+    web/                   # dashboard
+    fleet.db               # created on first start
+    admin_user.json        # created on first start (hashed password)
+    downloads/             # published .crx files
 ```
 
-Data lives in `/home/ext/url-fleet/fleet.db` (SQLite).
+```bash
+cd /opt/url-fleet
+docker compose up -d
+docker compose logs server | head -20     # first start prints the admin password once
+```
 
-## Updating the extension across the fleet — the signed-CRX way
+The server listens on `127.0.0.1:8080` only; `cloudflared` is the single way
+in, so Cloudflare provides TLS. `FLEET_TRUST_PROXY=cloudflare` (set in
+`docker-compose.yml`) makes the server read the visitor address from
+`CF-Connecting-IP`. Without it every browser looks like it comes from the
+Docker gateway and cannot be matched to its company — the dashboard shows a
+warning when that happens.
 
-This is the correct "update once, everyone gets it" mechanism. It ships
-**signed** packages through Chrome's own update channel — no custom code push,
-no runtime code execution (which MV3 forbids and which would make the extension
-look like malware).
+## Upgrading from v2 (dashboard.html + admin token)
 
-**Option A — Google Admin console (managed Chrome):**
-1. Package + upload the extension privately to the Chrome Web Store.
-2. Admin console → Devices → Chrome → Apps & extensions → **Force install** for
-   your org units.
-3. To update: upload the new version to the Web Store, bump `version` in
-   `manifest.json`. Every managed browser auto-updates within hours.
+1. Back up the data:
+   ```bash
+   cd /opt/url-fleet/app && cp fleet.db fleet.db.bak-$(date +%F)
+   ```
+2. Copy the new `server.py` and the whole `web/` folder into `app/`.
+   `dashboard.html` is no longer used and can be deleted.
+3. Dry-run the upgrade on a copy of the database (the original is not touched):
+   ```bash
+   docker compose exec server python server.py migrate-check /app/fleet.db
+   ```
+   It prints how many companies will exist, how devices will be matched and
+   any values it had to ignore. Every company is kept; an invalid NAT address
+   or DC IP is dropped and written into that company's notes.
+4. Add `FLEET_TRUST_PROXY: "cloudflare"` to the `server` environment in
+   `/opt/url-fleet/docker-compose.yml` (see the one in this repo).
+5. Restart: `docker compose up -d`.
+6. Sign in with the **same admin password** as before.
 
-**Option B — self-hosted update (GPO / registry, Windows domain):**
-1. Host the `.crx` + an `update_manifest.xml` on an internal web server.
-2. Group Policy: `ExtensionInstallForcelist` =
-   `<extension-id>;http://your-server/update_manifest.xml`.
-3. To update: publish the new `.crx`, bump the `version` in both `manifest.json`
-   and `update_manifest.xml`. Chrome polls and auto-updates.
+What happens on the first start of v3:
 
-Either way the fleet dashboard shows which version each device is actually
-running, so you can watch an update roll out.
+* Companies (including NAT addresses added in the old dashboard) move from the
+  old storage to a proper table. Devices, requests and the release stay as they are.
+* The global policy keeps its mode and lists. Lists longer than the new
+  10 000-character limit keep working and can still be saved or shortened,
+  but not grown; each browser receives at most 19 500 characters per list,
+  cut on a domain boundary with the company's own entries first.
+* `admin_token.txt` **stops working** — the dashboard now uses login sessions.
+  Any copy of the old token is useless. Delete the file.
+* Extensions already installed (v2.2.x) keep working unchanged and start
+  receiving their company's policy. Publish v2.3.0 to get the new popup and a
+  block page that names the company.
 
-## Hardening before leaving the LAN
+Forgot the password?
 
-- Put the backend behind **TLS** (reverse proxy) and replace the single admin
-  token with real accounts.
-- Restrict `/api/devices` and `/api/config` to the admin network.
-- The backend currently binds `0.0.0.0:8080` on an internal IP with the firewall
-  inactive; fine for a trusted LAN, not for internet exposure.
+```bash
+docker compose exec server python server.py reset-password
+```
+
+The running server picks up the new password immediately and every session
+is signed out.
+
+## Without Docker (systemd)
+
+```ini
+# /etc/systemd/system/url-fleet.service
+[Service]
+WorkingDirectory=/home/ext/url-fleet
+ExecStart=/usr/bin/python3 server.py
+Environment=FLEET_HOST=127.0.0.1 FLEET_TRUST_PROXY=none
+Restart=always
+User=ext
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now url-fleet
+sudo journalctl -u url-fleet -f
+```
+
+Put a TLS reverse proxy in front before exposing it beyond the LAN. With
+nginx use `FLEET_TRUST_PROXY=xff`; with direct LAN access use `none`.
+
+## Companies
+
+Add companies in the dashboard, or import a JSON file (Companies → Import) in
+the format of `companies.example.json`. A `companies.json` placed next to
+`server.py` is imported automatically on the very first start only. The real
+file contains internal AD names and addresses — keep it out of git
+(`.gitignore` already excludes it).
+
+## Backups
+
+Everything lives in `fleet.db` (SQLite, WAL mode), `admin_user.json` and
+`downloads/`. A safe online copy:
+
+```bash
+sqlite3 app/fleet.db ".backup app/fleet-$(date +%F).db"
+```
+
+Keep `signing-key.pem` (used by `pack_crx.py`) backed up offline — without it
+you cannot ship updates the fleet will accept.

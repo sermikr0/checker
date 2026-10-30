@@ -58,11 +58,12 @@ async function getDeviceId() {
 /** Apply ONLY known, type-checked setting keys pulled from the server (data, not code). */
 async function applyManagedConfig(config) {
   if (!config || typeof config !== 'object') return;
-  // Only the central WEB-FILTERING policy is pushed from the server. Everything
-  // else (toggles, VirusTotal key, allowlist) is the extension's own local
-  // setting and must never be overwritten by the server.
+  // Only the central WEB-FILTERING policy is pushed from the server (already
+  // merged for this device's company). Everything else (toggles, VirusTotal
+  // key, allowlist) is the extension's own local setting and must never be
+  // overwritten by the server.
   const clean = {};
-  if (typeof config.enforceMode === 'string') clean.enforceMode = config.enforceMode;
+  if (config.enforceMode === 'off' || config.enforceMode === 'blacklist' || config.enforceMode === 'whitelist') clean.enforceMode = config.enforceMode;
   if (typeof config.whitelist === 'string') clean.whitelist = config.whitelist.slice(0, 20000);
   if (typeof config.blacklist === 'string') clean.blacklist = config.blacklist.slice(0, 20000);
   if (!Object.keys(clean).length) return;
@@ -144,14 +145,17 @@ async function enforceOpenTabs(s) {
 async function reportAccessRequest(url) {
   const deviceId = await getDeviceId();
   try {
-    await fetch(MGMT.server + '/api/request-access', {
+    const resp = await fetch(MGMT.server + '/api/request-access', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deviceId, url: String(url || '') }),
       credentials: 'omit', cache: 'no-store',
       signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
     });
-  } catch (_) { /* best-effort */ }
+    return resp.ok;
+  } catch (_) {
+    return false;
+  }
 }
 
 async function applyStoredRules() {
@@ -177,7 +181,8 @@ async function reportTo(path, extra) {
     });
     if (!resp.ok) return;
     const data = await resp.json();
-    await chrome.storage.local.set({ managedLastSeen: Date.now(), managedServer: MGMT.server });
+    const company = data && data.policy && typeof data.policy.company === 'string' ? data.policy.company.slice(0, 120) : '';
+    await chrome.storage.local.set({ managedLastSeen: Date.now(), managedServer: MGMT.server, managedCompany: company });
     if (data && data.config) await applyManagedConfig(data.config);
     const mins = Number(data && data.heartbeatSec) > 0 ? Math.max(1, Math.round(data.heartbeatSec / 60)) : MGMT.defaultHeartbeatMin;
     try { chrome.alarms.create(MGMT.heartbeatAlarm, { periodInMinutes: mins }); } catch (_) { /* ignore */ }
@@ -242,13 +247,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
     case 'REQUEST_ACCESS':
       reportAccessRequest(String(msg.url || ''))
-        .then(() => sendResponse({ ok: true }))
+        .then((ok) => sendResponse({ ok }))
         .catch(() => sendResponse({ ok: false }));
       return true;
 
     case 'REFRESH_CONFIG':
       // Interstitial "Retry": pull the latest config now (picks up an approval
-      // without waiting for the next 5-minute heartbeat), then rebuild rules.
+      // without waiting for the next heartbeat), then rebuild rules.
       heartbeat()
         .then(() => sendResponse({ ok: true }))
         .catch(() => sendResponse({ ok: false }));

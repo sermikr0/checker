@@ -13,20 +13,48 @@ document.getElementById('fullurl').textContent = shown && shown !== domain ? sho
 
 const status = document.getElementById('status');
 const api = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) ? chrome.runtime : null;
+const say = (cls, text) => { status.className = cls; status.textContent = text; };
 
-document.getElementById('request').addEventListener('click', () => {
-  status.className = 'warn';
-  status.textContent = 'Sending request…';
-  if (!api) { status.textContent = 'Cannot reach the extension.'; return; }
-  api.sendMessage({ type: 'REQUEST_ACCESS', url: shown }, () => {
-    status.className = 'ok';
-    status.textContent = '✓ Request sent. Your IT team will review this site. Leave this tab or try again later.';
+// Explain which rule blocked the page, using what the fleet server last sent.
+if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+  chrome.storage.local.get(['settings', 'managedCompany']).then((d) => {
+    const mode = (d.settings && d.settings.enforceMode) || 'off';
+    const company = d.managedCompany || '';
+    const reason = document.getElementById('sign-reason');
+    const lead = document.getElementById('lead');
+    if (mode === 'blacklist') {
+      reason.textContent = 'on your company’s blocked list';
+      lead.textContent = 'Your IT team has blocked this site for everyone in your office. If you need it for work, ask for access below.';
+    }
+    const policy = document.getElementById('policy');
+    const label = { whitelist: 'only approved sites are allowed', blacklist: 'listed sites are blocked' }[mode];
+    if (label) {
+      policy.textContent = '';
+      const b = document.createElement('b');
+      b.textContent = company || 'Your organization';
+      policy.append(b, ': ' + label + '.');
+    }
+  }).catch(() => {});
+}
+
+document.getElementById('request').addEventListener('click', (e) => {
+  const btn = e.currentTarget;
+  if (!api) { say('err', 'The extension could not be reached. Reload the page and try again.'); return; }
+  btn.disabled = true;
+  say('warn', 'Sending your request…');
+  api.sendMessage({ type: 'REQUEST_ACCESS', url: shown }, (resp) => {
+    if (chrome.runtime.lastError || !resp || !resp.ok) {
+      btn.disabled = false;
+      say('err', 'The request could not be sent. Check your connection and try again.');
+      return;
+    }
+    btn.textContent = 'Request sent';
+    say('ok', 'Request sent. IT will review it. Press “Try again” later to see if the site is allowed.');
   });
 });
 
 document.getElementById('retry').addEventListener('click', () => {
-  status.className = 'warn';
-  status.textContent = 'Checking the latest policy…';
+  say('warn', 'Checking the latest policy…');
   const go = () => { if (raw) location.replace(shown); else history.back(); };
   if (api) api.sendMessage({ type: 'REFRESH_CONFIG' }, () => setTimeout(go, 600)); else go();
 });

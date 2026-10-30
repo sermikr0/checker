@@ -9,51 +9,59 @@
   <div id="app">
 
     <header class="header">
-      <img class="logo" src="icons/icon48.png" alt="" width="28" height="28">
+      <span class="brand-plate" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3l8 3v6c0 4.6-3.4 8.3-8 9-4.6-.7-8-4.4-8-9V6z" fill="currentColor"/><path d="M8.5 12l2.5 2.5 4.5-5" fill="none" stroke="#00704a" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </span>
       <div class="title">
         <h1>URL Safety Checker</h1>
-        <p>Logistics edition · phishing, malware &amp; freight-scam protection</p>
+        <p>Phishing, malware and freight-scam check</p>
       </div>
+      <span id="managed-chip" class="managed-chip hidden" title="This browser is managed by your organization"></span>
     </header>
 
     <nav class="tabs" role="tablist">
       <button class="tab active" role="tab" data-tab="check">Check</button>
       <button class="tab" role="tab" data-tab="page">This page</button>
+      <button class="tab" role="tab" data-tab="history">History</button>
       <button class="tab" role="tab" data-tab="settings">Settings</button>
     </nav>
 
     <!-- Check -->
     <section id="tab-check" class="tab-content">
       <div id="access-warning" class="notice hidden">
-        <strong>Site access is restricted.</strong> The hover preview, link marking and domain lookups cannot run.
-        Fix: open <code>chrome://extensions</code> → URL Safety Checker → <em>Details</em> → <em>Site access</em> → <strong>On all sites</strong>, then reload your tabs.
+        <strong>Site access is restricted.</strong> Hover preview, link marking and domain lookups cannot run.
+        Open <code>chrome://extensions</code> → URL Safety Checker → <em>Details</em> → <em>Site access</em> → <strong>On all sites</strong>, then reload your tabs.
       </div>
       <div class="input-group">
-        <input type="text" id="url-input" placeholder="Paste a link (hxxp and [.] are understood)" autocomplete="off" spellcheck="false" aria-label="URL to check">
-        <button id="paste-btn" class="icon-btn" title="Paste from clipboard" aria-label="Paste from clipboard">📋</button>
+        <input type="text" id="url-input" placeholder="Paste a link to check" autocomplete="off" spellcheck="false" aria-label="Link to check">
+        <button id="paste-btn" class="icon-btn" title="Paste from clipboard" aria-label="Paste from clipboard">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6v3H9zM8 5H6v15h12V5h-2"/></svg>
+        </button>
       </div>
       <button id="check-btn" class="btn-primary">
         <span id="btn-text">Check link</span>
         <span id="spinner" class="spinner hidden" aria-hidden="true"></span>
       </button>
+      <p class="hint">Defanged links like <code>hxxp://evil[.]com</code> work too.</p>
 
-      <div id="result" class="hidden">
+      <div id="result" class="hidden" aria-live="polite">
         <div id="verdict-box" class="verdict-box UNKNOWN">
-          <div id="verdict-icon" class="verdict-icon">❓</div>
+          <div class="verdict-sign">
+            <span id="verdict-icon" class="verdict-icon" aria-hidden="true">❓</span>
+            <span id="verdict-label" class="verdict-label">—</span>
+          </div>
           <div class="verdict-info">
-            <div id="verdict-label" class="verdict-label">—</div>
             <div id="verdict-url" class="verdict-url"></div>
+            <div class="bar-wrap">
+              <div class="bar-bg"><div id="risk-bar" class="risk-bar"></div></div>
+              <div class="bar-labels"><span>Risk</span><span id="bar-score">0 / 100</span></div>
+            </div>
           </div>
           <div id="risk-badge" class="risk-badge">0</div>
         </div>
 
-        <div class="bar-wrap">
-          <div class="bar-labels"><span>Risk score</span><span id="bar-score">0 / 100</span></div>
-          <div class="bar-bg"><div id="risk-bar" class="risk-bar"></div></div>
-        </div>
-
         <div class="section">
-          <div class="section-title">Findings</div>
+          <div class="section-title">What we found</div>
           <ul id="issues-list" class="issues-list"></ul>
         </div>
 
@@ -69,7 +77,7 @@
 
     <!-- This page -->
     <section id="tab-page" class="tab-content hidden">
-      <p class="hint">Analyzes every link on the current tab with the address rules (no network requests).</p>
+      <p class="hint">Checks every link on the current tab with the address rules. Nothing is sent anywhere.</p>
       <button id="scan-page-btn" class="btn-primary">Scan links on this page</button>
       <div id="page-stats" class="hidden">
         <div class="stats-grid">
@@ -82,37 +90,53 @@
       </div>
     </section>
 
+    <!-- History -->
+    <section id="tab-history" class="tab-content hidden">
+      <div class="history-header">
+        <span class="hint">Your last 50 checks. Stored only in this browser.</span>
+        <button id="clear-history" class="btn-small" type="button">Clear</button>
+      </div>
+      <div id="history-list" class="scrollable"></div>
+    </section>
+
     <!-- Settings -->
     <section id="tab-settings" class="tab-content hidden">
-      <div id="update-banner" style="background:#16351f;border:1px solid #22c55e88;color:#86efac;border-radius:9px;padding:11px 12px;margin-bottom:12px;font-weight:800;font-size:13.5px;text-align:center;letter-spacing:.3px">
-        ✅ UPDATED — NEW VERSION <span id="ub-ver"></span>
-      </div>
-      <div id="managed-notice" class="hint hidden" style="margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-        🛡️ Managed by your organization · <code id="managed-server">—</code>
+      <div id="managed-notice" class="managed hidden">
+        <div class="managed-head">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21h18M5 21V8l7-4 7 4v13M9 21v-6h6v6"/></svg>
+          <strong>Managed by your organization</strong>
+        </div>
+        <dl class="managed-facts">
+          <div><dt>Company</dt><dd id="managed-company">—</dd></div>
+          <div><dt>Web filtering</dt><dd id="managed-mode">—</dd></div>
+          <div class="wide"><dt>Server</dt><dd><code id="managed-server">—</code></dd></div>
+        </dl>
+        <p class="managed-note">Sends only a random device ID, the extension version and the browser version. Never your browsing history.</p>
       </div>
 
       <div class="settings-group toggle-group">
-        <label for="hover-preview">Hover preview on links</label>
+        <label for="hover-preview">Show a safety card when hovering a link</label>
         <label class="toggle"><input type="checkbox" id="hover-preview" checked><span class="slider"></span></label>
       </div>
       <div class="settings-group toggle-group">
-        <label for="mark-links">Mark risky links on web pages <span class="muted">(outline + red dot, badge count)</span></label>
+        <label for="mark-links">Mark risky links on web pages <span class="muted">Outline, dot and a count on the toolbar icon</span></label>
         <label class="toggle"><input type="checkbox" id="mark-links" checked><span class="slider"></span></label>
       </div>
       <div class="settings-group toggle-group">
-        <label for="active-fetch">Live check: open the link from this browser <span class="muted warn">Visits the link, which can confirm your email address to an attacker or use up a one-time link. Leave off unless you need to see redirects or downloads.</span></label>
+        <label for="active-fetch">Live check: open the link from this browser <span class="muted warn">Visits the link. That can confirm your address to a scammer or use up a one-time link. Leave off unless you need redirects or downloads.</span></label>
         <label class="toggle"><input type="checkbox" id="active-fetch"><span class="slider"></span></label>
       </div>
 
       <div class="settings-group">
-        <label for="vt-key">VirusTotal API key <span class="muted">(URL reputation — lookup only, never submitted)</span></label>
-        <input type="password" id="vt-key" placeholder="optional — paste your VirusTotal key" autocomplete="off" spellcheck="false">
+        <label for="vt-key">VirusTotal API key <span class="muted">Optional. Looks up the link’s reputation; never submits it.</span></label>
+        <input type="password" id="vt-key" placeholder="Paste your VirusTotal key" autocomplete="off" spellcheck="false">
       </div>
 
       <button id="save-settings" class="btn-primary">Save settings</button>
-      <div id="settings-saved" class="save-msg hidden">Saved</div>
+      <div id="settings-saved" class="save-msg hidden" role="status">Saved</div>
     </section>
 
+    <footer class="footer"><span id="ub-ver"></span></footer>
   </div>
   <script src="analyzer.js"></script>
   <script src="popup.js"></script>
