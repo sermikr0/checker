@@ -6,7 +6,7 @@ trucking companies: fake DAT / Truckstop / Highway logins, "renew your USDOT
 registration" fraud, rate-confirmation and BOL attachments that are really
 malware, carrier-packet lures, and "we changed our bank account" invoice fraud.
 
-Version 2.4.0, Manifest V3, no build step, no dependencies.
+Version 2.5.0, Manifest V3, no build step, no dependencies.
 
 ## Install (unpacked)
 
@@ -137,6 +137,14 @@ folder) runs the verdict suite against `analyzer.js`.
   cannot be scanned.
 - Scores are heuristics. A Caution on your own partner's new domain is normal;
   add it to the allowlist.
+
+## Changes in 2.5.0
+
+- Updates itself right after a new version is published: the heartbeat answer
+  carries the newest version number, and when it is newer the extension asks
+  Chrome for an update check (`chrome.runtime.requestUpdateCheck`, at most every
+  15 minutes) and restarts once Chrome has the new version. The code still
+  comes only from Chrome's signed update channel.
 
 ## Changes in 2.4.0
 

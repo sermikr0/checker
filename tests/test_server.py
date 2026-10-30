@@ -34,6 +34,7 @@ def use_data_dir(path):
     server.DOWNLOAD_DIR = os.path.join(path, "downloads")
     server.COMPANIES_SEED = [os.path.join(path, "companies.json")]
     server.BLOCKLIST_DIR = os.path.join(path, "blocklists")      # empty unless a test writes one
+    server._secret_key = None                                     # secret.key lives in the data dir
     server.invalidate()
 
 
@@ -715,6 +716,151 @@ class ComputersTests(ServerCase):
         st, body, _ = a.call("GET", "/api/companies/export", raw=True)
         kappa = [c for c in json.loads(body) if c["name"] == "Kappa"][0]
         self.assertEqual(kappa["computers"], ["K-1 10.9.9.1", "K-2"])
+
+
+class SecretsTests(ServerCase):
+    def test_seal_round_trip_and_tamper_check(self):
+        blob = server.seal("Test-Pa55 пароль")
+        self.assertTrue(blob.startswith("v1:"))
+        self.assertNotIn("Pa55", blob)
+        self.assertEqual(server.unseal(blob), "Test-Pa55 пароль")
+        self.assertNotEqual(server.seal("same"), server.seal("same"))       # random nonce
+        broken = blob[:-4] + ("AAAA" if not blob.endswith("AAAA") else "BBBB")
+        with self.assertRaises(ValueError):
+            server.unseal(broken)
+        mode = os.stat(os.path.join(server.DATA_DIR, "secret.key")).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_password_is_never_listed_only_revealed_and_audited(self):
+        a = self.admin()
+        st, j = a.post("/api/companies", {"name": "Sigma", "dc_ip": "10.93.0.5", "dc_user": "Administrator"})
+        cid = j["id"]
+        st, j = a.get("/api/companies/%d" % cid)
+        rev = j["company"]["rev"]
+        self.assertFalse(j["company"]["hasPassword"])
+        st, j = a.post("/api/companies/%d" % cid, {"dc_password": "Sup3r secret!", "rev": rev})
+        self.assertEqual(st, 200, j)
+        with server.read_db() as c:
+            stored = c.execute("SELECT dc_secret FROM companies WHERE id=?", (cid,)).fetchone()[0]
+        self.assertNotIn("Sup3r", stored)
+        for path in ("/api/companies", "/api/companies/%d" % cid, "/api/overview", "/api/audit"):
+            st, body, _ = a.call("GET", path, raw=True)
+            self.assertNotIn(b"Sup3r", body, path)
+            self.assertNotIn(b"v1:", body, path)
+        st, body, _ = a.call("GET", "/api/companies/export", raw=True)
+        self.assertNotIn(b"Sup3r", body)
+        st, j = a.get("/api/companies/%d" % cid)
+        self.assertTrue(j["company"]["hasPassword"])
+        self.assertEqual(j["company"]["dc_user"], "Administrator")
+        # saving the form without the password keeps it
+        st, j = a.post("/api/companies/%d" % cid, {"notes": "x", "rev": j["company"]["rev"]})
+        self.assertEqual(st, 200, j)
+        st, j = a.post("/api/companies/%d/password" % cid)
+        self.assertEqual((j["user"], j["password"]), ("Administrator", "Sup3r secret!"))
+        st, j = a.post("/api/companies/%d/rdp" % cid)
+        self.assertEqual((j["host"], j["user"], j["password"]), ("10.93.0.5", "Administrator", "Sup3r secret!"))
+        actions = [e["action"] for e in a.get("/api/audit")[1]["events"]]
+        self.assertIn("company.password.view", actions)
+        self.assertIn("company.rdp", actions)
+        # CSRF header and a session are required
+        st, _ = a.post("/api/companies/%d/password" % cid, csrf=False)
+        self.assertEqual(st, 403)
+        st, _ = Client(self.base).post("/api/companies/%d/rdp" % cid)
+        self.assertEqual(st, 401)
+        # an empty password removes it
+        st, j = a.get("/api/companies/%d" % cid)
+        a.post("/api/companies/%d" % cid, {"dc_password": "", "rev": j["company"]["rev"]})
+        st, j = a.get("/api/companies/%d" % cid)
+        self.assertFalse(j["company"]["hasPassword"])
+
+    def test_bad_user_and_password_are_rejected(self):
+        a = self.admin()
+        st, j = a.post("/api/companies", {"name": "Tau", "dc_user": "x /p:y"})
+        self.assertEqual(st, 400)
+        self.assertIn("dc_user", j["fields"])
+        st, j = a.post("/api/companies", {"name": "Tau", "dc_password": "a\nb"})
+        self.assertEqual(st, 400)
+        self.assertIn("dc_password", j["fields"])
+
+
+class AgentTests(ServerCase):
+    def agent_post(self, token, body, ip="198.51.100.50"):
+        c = Client(self.base)
+        return c.post("/api/agent/report", body, csrf=False,
+                      headers={"Authorization": "Bearer " + token, "CF-Connecting-IP": ip})
+
+    def test_agent_reports_computers_ips_and_power(self):
+        a = self.admin()
+        st, j = a.post("/api/companies", {"name": "Omega", "domain": "omega.local", "dc_ip": "10.93.0.5",
+                                          "computers": "TYPED-1 10.93.0.99"})
+        cid = j["id"]
+        st, j = a.post("/api/companies/%d/agent-token" % cid)
+        token = j["token"]
+        self.assertTrue(token.startswith("fa_"))
+        st, j = self.agent_post("fa_" + "x" * 40, {"computers": []})
+        self.assertEqual(st, 401)
+        report = {"version": "1.0", "dc": "WIN-DC", "domain": "omega.local", "computers": [
+            {"name": "ABRAHAM-1", "ip": "10.93.0.244", "os": "Windows 10 Pro", "reachable": True},
+            {"name": "MIKE-1", "ip": "10.93.0.238", "reachable": False},
+            {"name": "TYPED-1", "ip": "10.93.0.77", "reachable": True},
+            {"name": "<bad>", "ip": "10.93.0.1"},
+            {"name": "NOIP-1", "ip": "not-an-ip"},
+        ]}
+        st, j = self.agent_post(token, report)
+        self.assertEqual((st, j["computers"]), (200, 4), j)
+        st, j = a.get("/api/companies/%d" % cid)
+        comp = j["company"]
+        self.assertTrue(comp["agent"]["configured"] and comp["agent"]["fresh"])
+        self.assertEqual(comp["agent"]["info"]["dc"], "WIN-DC")
+        pcs = {p["name"]: p for p in comp["computerList"]}
+        self.assertEqual(set(pcs), {"TYPED-1", "ABRAHAM-1", "MIKE-1", "NOIP-1"})
+        self.assertEqual((pcs["ABRAHAM-1"]["ip"], pcs["ABRAHAM-1"]["ipSource"], pcs["ABRAHAM-1"]["power"]), ("10.93.0.244", "ad", "on"))
+        self.assertEqual(pcs["ABRAHAM-1"]["os"], "Windows 10 Pro")
+        self.assertEqual(pcs["MIKE-1"]["power"], "off")
+        self.assertEqual((pcs["TYPED-1"]["ip"], pcs["TYPED-1"]["ipSource"]), ("10.93.0.77", "ad"))
+        self.assertEqual(pcs["NOIP-1"]["ip"], "")
+        self.assertTrue(all(p["listed"] for p in pcs.values()))
+        # browsers are matched by the AD names the agent reported
+        st, j = Client(self.base).post("/api/enroll", {"deviceId": "dev-omega-001", "version": "2.5.0", "computerName": "mike-1"},
+                                       headers={"CF-Connecting-IP": "192.0.2.77"}, csrf=False)
+        self.assertEqual((j["policy"]["company"], j["policy"]["match"]), ("Omega", "computer"))
+        pcs = {p["name"]: p for p in a.get("/api/companies/%d" % cid)[1]["company"]["computerList"]}
+        self.assertEqual((pcs["MIKE-1"]["status"], pcs["MIKE-1"]["power"]), ("online", "on"))
+        # the next report replaces the AD list; an error report keeps it
+        self.agent_post(token, {"dc": "WIN-DC", "computers": [{"name": "ABRAHAM-1", "ip": "10.93.0.244", "reachable": False}]})
+        self.agent_post(token, {"dc": "WIN-DC", "error": "AD query failed: down"})
+        st, j = a.get("/api/companies/%d" % cid)
+        names = {p["name"] for p in j["company"]["computerList"] if p["inAd"]}
+        self.assertEqual(names, {"ABRAHAM-1"})
+        self.assertEqual(j["company"]["agent"]["info"]["error"], "AD query failed: down")
+        # a new token retires the old one
+        a.post("/api/companies/%d/agent-token" % cid)
+        st, _ = self.agent_post(token, {"computers": []})
+        self.assertEqual(st, 401)
+        # the token itself is not exposed
+        st, body, _ = a.call("GET", "/api/companies/%d" % cid, raw=True)
+        self.assertNotIn(token.encode(), body)
+
+    def test_checkin_announces_the_latest_release(self):
+        with server.write_db() as c:
+            server.kv_set(c, "release", {"appid": server.APPID, "version": "2.5.0", "filename": "x.crx"})
+        try:
+            st, j = self.checkin("dev-latest-0001", "198.51.100.60")
+            self.assertEqual(j["latestVersion"], "2.5.0")
+        finally:
+            with server.write_db() as c:
+                server.kv_set(c, "release", {"appid": server.APPID, "version": "", "filename": ""})
+
+    def test_tool_scripts_are_served(self):
+        c = Client(self.base)
+        st, body, hdrs = c.call("GET", "/tools/ad/fleet-ad.ps1", raw=True)
+        self.assertEqual(st, 200)
+        self.assertIn(b"Invoke-Report", body)
+        st, _, _ = c.call("GET", "/tools/fleet-rdp/install.sh", raw=True)
+        self.assertEqual(st, 200)
+        for bad in ("/tools/../server.py", "/tools/ad/agent.json", "/tools/fleet-rdp/..%2fserver.py"):
+            st, _, _ = c.call("GET", bad, raw=True)
+            self.assertNotEqual(st, 200, bad)
 
 
 class BlocklistTests(ServerCase):

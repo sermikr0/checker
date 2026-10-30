@@ -12,7 +12,9 @@ The server is one Python file plus the `web/` folder. It needs no packages.
     server.py
     web/                   # dashboard
     blocklists/            # built-in phishing lists (*.txt)
+    tools/                 # AD agent + RDP helpers, served under /tools/
     fleet.db               # created on first start
+    secret.key             # created on first start: encrypts the DC passwords (back it up with fleet.db)
     admin_user.json        # created on first start (hashed password)
     downloads/             # published .crx files
 ```
@@ -93,32 +95,58 @@ sudo journalctl -u url-fleet -f
 Put a TLS reverse proxy in front before exposing it beyond the LAN. With
 nginx use `FLEET_TRUST_PROXY=xff`; with direct LAN access use `none`.
 
-## Computer names and statuses (extension 2.4.0)
+## Updating the server
 
-The Company page shows each AD computer as *online*, *offline* or *no
-extension*. For that the extension must know the Windows computer name, which
-browsers cannot read themselves. IT sets it as an extension policy:
+Copy the code over the app folder; data files (`fleet.db`, `secret.key`,
+`admin_user.json`, `downloads/`, `companies.json`) are not in the archive and stay:
 
-* **Group Policy (recommended)** — Computer Configuration → Preferences →
-  Windows Settings → Registry → New Registry Item:
-  * Hive: `HKEY_LOCAL_MACHINE`
-  * Key path: `Software\Policies\Google\Chrome\3rdparty\extensions\lddmakdihlenfbmdpggpahjooglgigoi\policy`
-  * Value name: `computerName`, type `REG_SZ`, value data: `%ComputerName%`
-* **One computer by hand** (cmd as administrator; `%COMPUTERNAME%` is expanded by cmd):
-  ```
-  reg add "HKLM\Software\Policies\Google\Chrome\3rdparty\extensions\lddmakdihlenfbmdpggpahjooglgigoi\policy" /v computerName /t REG_SZ /d "%COMPUTERNAME%" /f
-  ```
+```bash
+tar czf /tmp/fleet-deploy.tar.gz server.py web/ blocklists/ tools/
+scp /tmp/fleet-deploy.tar.gz root@<vps>:/tmp/
+ssh root@<vps> 'cd /opt/url-fleet/app && tar xzf /tmp/fleet-deploy.tar.gz && cd .. && docker compose restart server'
+```
+
+## AD agent on each domain controller
+
+Company → Computers → **Set up AD agent** creates a token for that company and
+shows the install command. On the DC, in PowerShell as administrator:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; & ([scriptblock]::Create((irm https://fleet.red1.uz/tools/ad/fleet-ad.ps1))) -Install -Server https://fleet.red1.uz -Token fa_...
+```
+
+It installs `C:\ProgramData\URLFleet\` (script, `agent.json` with the token,
+`agent.log`; SYSTEM and Administrators only), the scheduled task
+**URL Fleet AD agent** (every 5 minutes and at startup, as SYSTEM), sends the
+first report, and sets up the **URL Fleet - Chrome** GPO linked to the domain:
+
+* `ExtensionInstallForcelist`: `lddmakdihlenfbmdpggpahjooglgigoi;https://fleet.red1.uz/update_manifest.xml`
+  (an existing entry for this extension in any GPO is corrected instead of duplicated);
+* Preferences → Registry: `HKLM\Software\Policies\Google\Chrome\3rdparty\extensions\lddmakdihlenfbmdpggpahjooglgigoi\policy`,
+  `computerName` = `%ComputerName%`.
+
+Computers apply the GPO within ~90 minutes (`gpupdate /force` for one now).
+Add `-NoGpo` to skip the policy part, `-Uninstall` to remove the agent. A new
+token from the dashboard retires the old one (run the command again).
+The DC needs outbound HTTPS to the fleet server; nothing connects to the DC.
+
+## Computer names without the agent
+
+The `computerName` policy can also be set by hand on one computer (cmd as administrator):
+
+```
+reg add "HKLM\Software\Policies\Google\Chrome\3rdparty\extensions\lddmakdihlenfbmdpggpahjooglgigoi\policy" /v computerName /t REG_SZ /d "%COMPUTERNAME%" /f
+```
 
 Chrome picks the policy up within minutes (or at once from `chrome://policy` →
 *Reload policies*). The popup's Settings tab shows the computer name it sends.
 
-## Local IPs from AD DNS
+## Local IPs from AD DNS (fallback)
 
-Every 15 minutes the server asks each company's DC (`dc_ip`, port 53) for
-`<computer>.<AD domain>`. The container must be able to reach the DCs — check
-from the host with `dig @10.111.0.5 shod.local` (or `nslookup shod.local 10.111.0.5`).
-If a DC is unreachable the Company page says so; IPs can then be typed into
-the computer list as `PC-01 10.111.5.20`.
+Without the agent, every 15 minutes the server asks each company's DC
+(`dc_ip`, port 53) for `<computer>.<AD domain>` — only if the container can
+reach the DCs (VPN). Otherwise IPs can be typed into the computer list as
+`PC-01 10.111.5.20`.
 
 ## Companies
 
@@ -130,8 +158,8 @@ file contains internal AD names and addresses — keep it out of git
 
 ## Backups
 
-Everything lives in `fleet.db` (SQLite, WAL mode), `admin_user.json` and
-`downloads/`. A safe online copy:
+Everything lives in `fleet.db` (SQLite, WAL mode), `secret.key` (without it
+the saved DC passwords cannot be read), `admin_user.json` and `downloads/`. A safe online copy:
 
 ```bash
 sqlite3 app/fleet.db ".backup app/fleet-$(date +%F).db"

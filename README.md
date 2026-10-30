@@ -5,11 +5,12 @@ extension: anti-phishing for logistics offices plus central web filtering,
 with a separate policy per company.
 
 ```
-extension/        Chrome MV3 extension (v2.4.0)
+extension/        Chrome MV3 extension (v2.5.0)
 server.py         Fleet server — Python 3.11+ standard library only, SQLite
 web/              Admin dashboard (no build step, served by server.py)
 tests/            End-to-end server tests (python3 -m unittest discover -s tests)
-tools/            i18n_check.py; fleet-rdp/ (xfreerdp link handler for the RDP buttons)
+tools/            ad/fleet-ad.ps1 (AD agent for domain controllers); fleet-rdp/ (RDP link
+                  handlers for Linux and Windows); i18n_check.py — served by the server under /tools/
 pack_crx.py       Packs and signs the extension as CRX3
 companies.example.json   Format for importing companies
 ```
@@ -30,40 +31,68 @@ delivery, access requests, self-hosted Chrome updates, audit log.
 | Page | |
 |---|---|
 | Overview | Who is online, the fleet board (one lane per company), versions, recent activity |
-| Companies | Search, filter, sort; an **RDP** button per company opens xfreerdp to its domain controller; link unknown addresses to a company |
-| Company | The AD **computer list**: local IP (from the company's AD DNS), extension status online / offline / not installed, version, last check-in; details |
+| Companies | Search, filter, sort; an **RDP** button per company connects to its domain controller; link unknown addresses to a company |
+| Company | The AD **computer list** (from the AD agent): local IP, turned on / off, extension online / offline / not installed, version, last check-in; details with the DC user name and password (hidden, show/hide) |
 | Global policy | Mode and allowed / blocked lists for everyone |
 | Access requests | Allow / reject / block (global lists); history |
 | Updates | Upload a signed CRX |
 | Activity log | Every admin action with who and from where |
 | Settings | Password, sessions, theme, language |
 
-## Computers, local IPs and status
+## Computers, local IPs and status (AD agent)
 
-* **Local IP** — the server looks every AD computer up in the company's own DNS
-  (`<name>.<AD domain>` asked from the DC IP) every 15 minutes and on
-  *Refresh IPs*. The fleet server needs a route to the offices' DCs (VPN). If a
-  DC cannot be reached, IPs can be typed in the company details as
-  `PC-01 10.118.5.20`.
-* **Status** — extension 2.4.0 reports the Windows computer name that IT sets
-  through Chrome policy (`computerName`, see DEPLOYMENT.md). A computer is
-  *online* when one of its browsers checked in during the last 3 minutes,
-  *offline* otherwise, and *no extension* if no browser reported its name.
-* The computer name also assigns the browser to its company, before NAT and subnet.
+Each company's domain controller runs the **AD agent** (`tools/ad/fleet-ad.ps1`,
+a scheduled task as SYSTEM). Every 5 minutes it sends the server the domain's
+enabled computers with their local IPv4 (AD DNS), OS and whether they answer
+right now (ping, or TCP 445/3389/135). New computers joined to the domain show
+up on their own. The agent only sends data; nothing is ever run from the server.
+
+Install it from the dashboard: Company → Computers → **Set up AD agent** shows
+a one-line PowerShell command with the company's token. Run it as
+administrator on the DC. The same command also sets up the domain's
+**"URL Fleet - Chrome"** group policy:
+
+* force-install of the extension with the fleet update URL (an existing entry
+  for the extension in any GPO is pointed at that URL instead), so every
+  version uploaded in the dashboard reaches all browsers;
+* the extension's `computerName` policy (`%ComputerName%`, Group Policy Preferences).
+
+Statuses on the Company page:
+
+* **Computer status** — *turned on* when the agent reached it in its last run
+  (or one of its browsers is checking in), *turned off* otherwise.
+* **Extension** — *online* when a browser on that computer checked in during
+  the last 3 minutes, *offline* otherwise, *no extension* if none reported its
+  name (extension 2.5.0 + the `computerName` policy).
+* The computer name also assigns a browser to its company, before NAT and subnet.
+
+Without the agent the server can still look IPs up in the DC's DNS itself
+(needs a route/VPN to the office) or take them typed in as `PC-01 10.118.5.20`.
 
 ## RDP to a company's domain controller
 
-The RDP button opens `fleet-rdp://connect?host=<DC IP>&domain=<AD domain>&user=<name>`.
-Install the handler once per Linux admin computer:
+The RDP button opens a `fleet-rdp://` link that a small helper on the admin's
+computer hands to **xfreerdp** (Linux) or **Remote Desktop / mstsc** (Windows),
+both with dynamic resolution. Install the helper once — Settings → Remote
+desktop shows the commands; the scripts are served by the fleet server:
 
 ```bash
-bash tools/fleet-rdp/install.sh      # needs xfreerdp (freerdp3-x11 or freerdp2-x11)
+curl -fsSL https://fleet.red1.uz/tools/fleet-rdp/install.sh | FLEET_SERVER=https://fleet.red1.uz bash
+```
+```powershell
+powershell -ExecutionPolicy Bypass -Command "$env:FLEET_SERVER='https://fleet.red1.uz'; irm https://fleet.red1.uz/tools/fleet-rdp/install-windows.ps1 | iex"
 ```
 
-It opens a terminal, shows the target, and runs
-`xfreerdp /v:<DC> /d:<domain> /u:<user> /dynamic-resolution +clipboard /cert:tofu`.
-Only private addresses are accepted. The user name is set per browser in
-Settings → Remote desktop.
+* **Password per company** — Company → Details: *DC user name* and *DC
+  password*. The password is stored encrypted (key in `secret.key` next to the
+  database, never in it), never appears in lists or exports, and is shown only
+  with the eye button. Showing it and every RDP connection go to the activity log.
+* With a saved password the button connects at once:
+  `xfreerdp /v:<DC> /u:<user> /p:<password> /dynamic-resolution +clipboard /cert:tofu`.
+  Without one, the helper uses a user name and password kept only on the admin's
+  computer (keyring / DPAPI), asked once.
+* The helper only connects to private addresses, and Chrome asks once before
+  a site may open it.
 
 ## Built-in phishing list
 

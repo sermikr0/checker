@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Registers the fleet-rdp:// link handler for the current Linux user so the
-# dashboard's RDP button opens xfreerdp (dynamic resolution) to a company's DC.
+# Ubuntu/Linux: registers the fleet-rdp:// link handler for the current user,
+# so the dashboard's RDP button opens xfreerdp (dynamic resolution) at once,
+# and asks once for the user name and password used on every domain controller.
 #
 #   bash tools/fleet-rdp/install.sh
-#   curl -fsSL https://raw.githubusercontent.com/sermikr0/checker/main/tools/fleet-rdp/install.sh | bash
+#   curl -fsSL https://fleet.red1.uz/tools/fleet-rdp/install.sh | FLEET_SERVER=https://fleet.red1.uz bash
 set -euo pipefail
 
 BIN="${HOME}/.local/bin"
 APPS="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
-SRC_URL="https://raw.githubusercontent.com/sermikr0/checker/main/tools/fleet-rdp/fleet_rdp.py"
+SERVER="${FLEET_SERVER:-https://fleet.red1.uz}"
+SRC_URL="${SERVER%/}/tools/fleet-rdp/fleet_rdp.py"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
 
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
@@ -36,6 +38,15 @@ command -v update-desktop-database >/dev/null && update-desktop-database "$APPS"
 xdg-mime default fleet-rdp.desktop x-scheme-handler/fleet-rdp
 
 if ! command -v xfreerdp3 >/dev/null && ! command -v xfreerdp >/dev/null; then
-  echo "Note: install FreeRDP first: sudo apt install freerdp3-x11   (older systems: freerdp2-x11)"
+  echo "Note: install FreeRDP: sudo apt install freerdp3-x11   (older systems: freerdp2-x11)"
 fi
-echo "Done. Press RDP next to a company in the dashboard; Chrome asks once to allow xdg-open."
+
+# Fallback user name + password for companies without a password saved in the
+# dashboard; stored only on this computer (keyring, or a 600 file).
+if (: </dev/tty) 2>/dev/null; then
+  echo "Companies with a password in the dashboard need nothing more. For the others:"
+  python3 "$BIN/fleet-rdp" --setup </dev/tty || true
+else
+  echo "Optional: save a user name and password for companies without one in the dashboard: $BIN/fleet-rdp --setup"
+fi
+echo "Done. Press RDP next to a company in the dashboard; Chrome asks once to allow it."

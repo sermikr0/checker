@@ -199,6 +199,7 @@ async function reportTo(path, extra) {
     const company = data && data.policy && typeof data.policy.company === 'string' ? data.policy.company.slice(0, 120) : '';
     await chrome.storage.local.set({ managedLastSeen: Date.now(), managedServer: MGMT.server, managedCompany: company, managedComputer: computerName });
     if (data && data.config) await applyManagedConfig(data.config);
+    if (data) maybeUpdate(data.latestVersion);
     const mins = Number(data && data.heartbeatSec) > 0 ? Math.max(1, Math.round(data.heartbeatSec / 60)) : MGMT.defaultHeartbeatMin;
     try { chrome.alarms.create(MGMT.heartbeatAlarm, { periodInMinutes: mins }); } catch (_) { /* ignore */ }
   } catch (_) {
@@ -206,6 +207,37 @@ async function reportTo(path, extra) {
     // locally and retries on the next heartbeat. Enrollment is best-effort.
   }
 }
+
+/* A newer version was published in the dashboard: ask Chrome to fetch it now
+ * instead of waiting for its own check (every few hours). Chrome downloads it
+ * from the update URL and verifies the signature as usual; the server only
+ * says which version exists. onUpdateAvailable then applies it. */
+const UPDATE_CHECK_MIN_MS = 15 * 60 * 1000;
+
+function newerVersion(a, b) {
+  const pa = String(a).split('.').map(Number);
+  const pb = String(b).split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+async function maybeUpdate(latest) {
+  if (typeof latest !== 'string' || !/^\d{1,5}(\.\d{1,5}){0,3}$/.test(latest)) return;
+  if (!newerVersion(latest, chrome.runtime.getManifest().version)) return;
+  try {
+    const d = await chrome.storage.local.get('updateCheckAt');
+    if (Date.now() - (d.updateCheckAt || 0) < UPDATE_CHECK_MIN_MS) return;
+    await chrome.storage.local.set({ updateCheckAt: Date.now() });
+    chrome.runtime.requestUpdateCheck(() => void chrome.runtime.lastError);
+  } catch (_) { /* ignore */ }
+}
+
+// The new version is downloaded: restart the extension so it takes over now.
+chrome.runtime.onUpdateAvailable.addListener(() => { chrome.runtime.reload(); });
 
 function enroll() { return reportTo('/api/enroll', {}); }
 function heartbeat() { return reportTo('/api/heartbeat', {}); }

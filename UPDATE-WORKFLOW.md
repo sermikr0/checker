@@ -12,7 +12,8 @@ that the package carries the fleet's extension ID before publishing it.
 ## One-time: force-install on each computer
 
 Self-hosted updates only work for policy-installed extensions ("Load unpacked"
-never updates):
+never updates). On domain computers the **AD agent** sets this up through the
+"URL Fleet - Chrome" GPO (DEPLOYMENT.md → *AD agent*). By hand:
 
 * **Windows** (admin, then restart Chrome):
   ```
@@ -24,8 +25,8 @@ never updates):
   ```
 * **Group Policy / Google Admin console** — force-install the ID above with the update URL above.
 
-For per-computer statuses (2.4.0+) also set the `computerName` extension
-policy — see DEPLOYMENT.md → *Computer names and statuses*.
+For per-computer statuses (2.5.0) the `computerName` extension policy is
+needed too — the AD agent's GPO sets it.
 
 ## Every release
 
@@ -36,8 +37,12 @@ policy — see DEPLOYMENT.md → *Computer names and statuses*.
    python3 pack_crx.py extension signing-key.pem url-safety-checker-<version>.crx
    ```
 4. Dashboard → **Updates** → drop the `.crx` on the upload area.
-5. Browsers pick it up within a few hours (or at once from `chrome://extensions` → **Update**).
-   The Overview page shows how many browsers already run the new version.
+5. Browsers running **2.5.0 or newer** update within a few minutes: their next
+   check-in learns the new version number and asks Chrome to update now
+   (Chrome still downloads the CRX from the update URL and checks its signature).
+   Older versions wait for Chrome's own check (every few hours, or at browser
+   start); `chrome://extensions` → **Update** forces it on one computer.
+   The Company pages show which version each computer runs.
 
 Publishing a version that is not newer than the current one asks for
 confirmation — Chrome never downgrades, so it would have no effect on

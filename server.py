@@ -26,8 +26,10 @@ Run:
     python3 server.py migrate-check [fleet.db]   # dry-run the upgrade on a copy of the database
 """
 
+import base64
 import getpass
 import hashlib
+import hmac
 import io
 import ipaddress
 import json
@@ -62,6 +64,8 @@ USER_PATH = os.path.join(DATA_DIR, "admin_user.json")
 LEGACY_TOKEN_PATH = os.path.join(DATA_DIR, "admin_token.txt")
 DOWNLOAD_DIR = os.path.join(DATA_DIR, "downloads")
 COMPANIES_SEED = [os.path.join(DATA_DIR, "companies.json"), os.path.join(HERE, "companies.json")]
+# Helper scripts served to admins (RDP handlers, AD agent): copied with the server.
+TOOLS_DIR = os.path.join(HERE, "tools")
 
 HOST = os.environ.get("FLEET_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FLEET_PORT", "8080"))
@@ -73,7 +77,7 @@ PORT = int(os.environ.get("FLEET_PORT", "8080"))
 TRUST_PROXY = os.environ.get("FLEET_TRUST_PROXY", "none").strip().lower()
 LOG_HEARTBEATS = os.environ.get("FLEET_LOG_HEARTBEATS", "0") == "1"
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 # Stable extension id derived from signing-key.pem (reused for every release).
 APPID = os.environ.get("FLEET_APPID", "lddmakdihlenfbmdpggpahjooglgigoi")
 
@@ -83,6 +87,8 @@ DNS_INTERVAL = int(os.environ.get("FLEET_DNS_INTERVAL", "900"))   # seconds; 0 =
 DNS_PORT = int(os.environ.get("FLEET_DNS_PORT", "53"))
 DNS_TIMEOUT = float(os.environ.get("FLEET_DNS_TIMEOUT", "1.0"))
 ONLINE_SEC = 180            # no check-in for longer than this = offline
+# The AD agent on each domain controller reports every 5 minutes; older data is "stale".
+AGENT_STALE_SEC = int(os.environ.get("FLEET_AGENT_STALE_SEC", "1200"))
 SESSION_IDLE_SEC = 12 * 3600
 SESSION_MAX_SEC = 7 * 24 * 3600
 SESSION_COOKIE = "usc_session"
@@ -318,6 +324,7 @@ LOGIN_FAILS = RateLimiter(5, 15 * 60)
 REQUEST_PER_DEVICE = RateLimiter(20, 10 * 60)
 REQUEST_PER_IP = RateLimiter(200, 10 * 60)
 NEW_DEVICES_PER_IP = RateLimiter(300, 60 * 60)
+AGENT_PER_IP = RateLimiter(120, 10 * 60)
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -427,7 +434,21 @@ def init_db():
                        created_at  TEXT,
                        updated_at  TEXT)""")
         _ensure_columns(c, "companies", {"rev": "INTEGER DEFAULT 0", "dns_status": "TEXT DEFAULT ''",
-                                         "dns_checked_at": "TEXT DEFAULT ''", "dns_found": "INTEGER DEFAULT 0"})
+                                         "dns_checked_at": "TEXT DEFAULT ''", "dns_found": "INTEGER DEFAULT 0",
+                                         "dc_user": "TEXT DEFAULT ''", "dc_secret": "TEXT DEFAULT ''",
+                                         "agent_token": "TEXT DEFAULT ''", "agent_seen": "TEXT DEFAULT ''",
+                                         "agent_info": "TEXT DEFAULT ''"})
+        # Computers reported by the AD agent on the company's domain controller.
+        c.execute("""CREATE TABLE IF NOT EXISTS ad_computers (
+                       company_id INTEGER NOT NULL,
+                       name       TEXT NOT NULL COLLATE NOCASE,
+                       ip         TEXT DEFAULT '',
+                       os         TEXT DEFAULT '',
+                       reachable  INTEGER DEFAULT 0,
+                       last_up    TEXT DEFAULT '',
+                       last_logon TEXT DEFAULT '',
+                       seen_at    TEXT DEFAULT '',
+                       PRIMARY KEY (company_id, name))""")
         c.execute("""CREATE TABLE IF NOT EXISTS computer_ips (
                        company_id INTEGER NOT NULL,
                        name       TEXT NOT NULL COLLATE NOCASE,
@@ -504,7 +525,78 @@ def init_db():
         kv_set(c, "schema_version", 3)
 
 
+# ── Secrets (AD passwords) ───────────────────────────────────────────────────
+# Stored encrypted with a key kept in secret.key next to the database (not in it),
+# so a copy of fleet.db alone does not reveal them. Stdlib only: HMAC-SHA256 in
+# counter mode as the keystream, then encrypt-then-MAC with a separate HMAC key.
+
+_secret_key = None
+_secret_lock = threading.Lock()
+
+
+def _master_key():
+    global _secret_key
+    with _secret_lock:
+        if _secret_key is None:
+            path = os.path.join(DATA_DIR, "secret.key")
+            try:
+                with open(path, "rb") as f:
+                    key = f.read()
+            except FileNotFoundError:
+                os.makedirs(DATA_DIR, exist_ok=True)
+                key = secrets.token_bytes(32)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(key)
+            if len(key) != 32:
+                raise RuntimeError("%s is damaged (expected 32 bytes)" % path)
+            _secret_key = key
+        return _secret_key
+
+
+def _secret_keys():
+    m = _master_key()
+    return hmac.new(m, b"fleet-enc", hashlib.sha256).digest(), hmac.new(m, b"fleet-mac", hashlib.sha256).digest()
+
+
+def _keystream(key, nonce, n):
+    out, ctr = bytearray(), 0
+    while len(out) < n:
+        out += hmac.new(key, nonce + struct.pack(">I", ctr), hashlib.sha256).digest()
+        ctr += 1
+    return bytes(out[:n])
+
+
+def seal(text):
+    if not text:
+        return ""
+    ek, mk = _secret_keys()
+    nonce = secrets.token_bytes(16)
+    pt = text.encode("utf-8")
+    ct = bytes(a ^ b for a, b in zip(pt, _keystream(ek, nonce, len(pt))))
+    tag = hmac.new(mk, nonce + ct, hashlib.sha256).digest()
+    return "v1:" + base64.urlsafe_b64encode(nonce + ct + tag).decode("ascii")
+
+
+def unseal(blob):
+    if not blob:
+        return ""
+    if not blob.startswith("v1:"):
+        raise ValueError("unknown secret format")
+    raw = base64.urlsafe_b64decode(blob[3:].encode("ascii"))
+    if len(raw) < 48:
+        raise ValueError("secret is too short")
+    nonce, ct, tag = raw[:16], raw[16:-32], raw[-32:]
+    ek, mk = _secret_keys()
+    if not hmac.compare_digest(tag, hmac.new(mk, nonce + ct, hashlib.sha256).digest()):
+        raise ValueError("secret does not match secret.key")
+    return bytes(a ^ b for a, b in zip(ct, _keystream(ek, nonce, len(ct)))).decode("utf-8")
+
+
 # ── Companies ────────────────────────────────────────────────────────────────
+
+_DC_USER_RE = re.compile(r"^[A-Za-z0-9._@\\][A-Za-z0-9 ._@\\-]{0,103}$")
+
 
 def _str_list(value, max_items, max_len):
     if value is None:
@@ -620,6 +712,20 @@ def validate_company(data, partial=True):
         clean["computer_ips"] = ips
     if has("notes"):
         clean["notes"] = str(data.get("notes") or "").strip()[:1000]
+    if has("dc_user"):
+        user = str(data.get("dc_user") or "").strip()
+        if user and not _DC_USER_RE.match(user):
+            errors["dc_user"] = "use letters, digits and . _ - @ \\ only"
+        clean["dc_user"] = user[:104]
+    if "dc_password" in data:
+        pw = data.get("dc_password")
+        pw = "" if pw is None else str(pw)
+        if len(pw) > 256:
+            errors["dc_password"] = "too long"
+        elif any(ord(ch) < 32 or ord(ch) == 127 for ch in pw):
+            errors["dc_password"] = "control characters are not allowed"
+        else:
+            clean["dc_secret"] = seal(pw)
     if has("policy_mode") and ("policy_mode" in data):
         m = str(data.get("policy_mode") or "inherit")
         if m not in COMPANY_MODES:
@@ -642,12 +748,13 @@ def _insert_company(conn, clean, ts):
     manual = clean.pop("computer_ips", {})
     cur = conn.execute(
         """INSERT INTO companies (name, domain, dc_ip, subnet, nat_ips, computers, notes,
-                                  policy_mode, whitelist, blacklist, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  policy_mode, whitelist, blacklist, created_at, updated_at, dc_user, dc_secret)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (clean.get("name"), clean.get("domain", ""), clean.get("dc_ip", ""), clean.get("subnet", ""),
          json.dumps(clean.get("nat_ips", [])), json.dumps(clean.get("computers", []), ensure_ascii=False),
          clean.get("notes", ""), clean.get("policy_mode", "inherit"),
-         clean.get("whitelist", ""), clean.get("blacklist", ""), ts, ts),
+         clean.get("whitelist", ""), clean.get("blacklist", ""), ts, ts,
+         clean.get("dc_user", ""), clean.get("dc_secret", "")),
     )
     store_computer_ips(conn, cur.lastrowid, clean.get("computers", []), manual)
     return cur.lastrowid
@@ -747,6 +854,14 @@ def company_row_to_dict(r):
             d[k] = json.loads(d.get(k) or "[]")
         except ValueError:
             d[k] = []
+    # Secrets never leave the database through this dict.
+    d["has_password"] = bool(d.pop("dc_secret", "") or "")
+    d["agent_configured"] = bool(d.pop("agent_token", "") or "")
+    d["dc_user"] = d.get("dc_user") or ""
+    try:
+        d["agent_info"] = json.loads(d.get("agent_info") or "{}")
+    except ValueError:
+        d["agent_info"] = {}
     d["whitelist"] = text_domains(d.get("whitelist", ""))
     d["blacklist"] = text_domains(d.get("blacklist", ""))
     return d
@@ -795,6 +910,24 @@ def load_threats():
         return _threats
 
 
+def company_computers(comp):
+    """Computers typed in the company form, then those the AD agent reported."""
+    out = list(comp.get("computers") or [])
+    seen = {n.lower() for n in out}
+    for n in comp.get("ad_computers") or []:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out
+
+
+def agent_state(comp, now_ts=None):
+    seen = comp.get("agent_seen") or ""
+    age = (now_ts or time.time()) - iso_to_ts(seen) if seen else None
+    return {"configured": bool(comp.get("agent_configured")), "seen": seen,
+            "fresh": age is not None and age <= AGENT_STALE_SEC, "info": comp.get("agent_info") or {}}
+
+
 class Snapshot:
     """Immutable, cached view of companies + global policy used on every check-in."""
 
@@ -809,7 +942,7 @@ class Snapshot:
             nets_nat = [n for n in (ip_entry_to_network(x) for x in c["nat_ips"]) if n is not None]
             sn = subnet_to_network(c.get("subnet"))
             self._index.append((c, nets_nat, [sn] if sn is not None else []))
-            for pc in c["computers"]:
+            for pc in company_computers(c):
                 lst = self.by_computer.setdefault(pc.lower(), [])
                 if c not in lst:
                     lst.append(c)
@@ -915,6 +1048,11 @@ def snapshot():
             with read_db() as c:
                 rows = [company_row_to_dict(r) for r in c.execute("SELECT * FROM companies ORDER BY name COLLATE NOCASE")]
                 policy = load_policy(c)
+                ad = {}
+                for r in c.execute("SELECT company_id, name FROM ad_computers ORDER BY name COLLATE NOCASE"):
+                    ad.setdefault(r["company_id"], []).append(r["name"])
+            for row in rows:
+                row["ad_computers"] = ad.get(row["id"], [])
             _snapshot = Snapshot(rows, policy, threats["domains"])
             _snapshot.threat_sig = threats["sig"]
         return _snapshot
@@ -1540,6 +1678,7 @@ def _checkin(h, kind):
     ip = h.client_ip()
     ts = now_iso()
     with write_db() as c:
+        latest = (kv_get(c, "release", {}) or {}).get("version") or ""
         row = c.execute("SELECT device_id, company_id, computer_name FROM devices WHERE device_id=?", (did,)).fetchone()
         if row:
             counter = "enroll_count=enroll_count+1" if kind == "enroll" else "beats=beats+1"
@@ -1562,6 +1701,8 @@ def _checkin(h, kind):
     h.json(200, {
         "ok": True,
         "heartbeatSec": HEARTBEAT_SEC,
+        # Newest published extension version: 2.5.0+ asks Chrome to update right away.
+        "latestVersion": latest,
         "config": {"enforceMode": eff["deliverMode"], "whitelist": eff["deliverWhitelist"],
                    "blacklist": eff["deliverBlacklist"]},
         "policy": {"company": eff["company"], "scope": "company" if company else "global",
@@ -1643,6 +1784,28 @@ def r_download(h, name):
         data = f.read()
     h.send(200, data, "application/x-chrome-extension",
            {"Content-Disposition": 'attachment; filename="%s"' % os.path.basename(name)})
+
+
+TOOL_FILES = {
+    "fleet-rdp/install.sh": "text/x-shellscript; charset=utf-8",
+    "fleet-rdp/fleet_rdp.py": "text/x-python; charset=utf-8",
+    "fleet-rdp/install-windows.ps1": "text/plain; charset=utf-8",
+    "fleet-rdp/fleet-rdp.ps1": "text/plain; charset=utf-8",
+    "ad/fleet-ad.ps1": "text/plain; charset=utf-8",
+}
+
+
+@route("GET", r"/tools/([a-z-]+/[A-Za-z0-9_.-]+)", auth=False)
+def r_tool(h, rel):
+    """Helper scripts for admins (RDP handler, AD agent). Public, like the CRX."""
+    if rel not in TOOL_FILES:
+        raise HTTPError(404, "not found")
+    path = os.path.join(TOOLS_DIR, rel)
+    if not os.path.isfile(path):
+        raise HTTPError(404, "tools/%s is missing on the server — deploy the tools folder too" % rel)
+    with open(path, "rb") as f:
+        data = f.read()
+    h.send(200, data, TOOL_FILES[rel], {"Cache-Control": "no-cache"})
 
 
 # ── Auth endpoints ───────────────────────────────────────────────────────────
@@ -1874,14 +2037,16 @@ def _company_summary(comp, snap, devs):
     versions = Counter(d.get("version") or "unknown" for d in mine)
     # Coverage: AD computers that run the extension. Exact when browsers report
     # their computer name (2.4.0 + policy); otherwise estimated from the browser count.
-    listed = {n.lower() for n in comp["computers"]}
+    listed = {n.lower() for n in company_computers(comp)}
     named = {d["computer_name"].lower() for d in mine if d.get("computer_name")} & listed
     unnamed = sum(1 for d in mine if not d.get("computer_name"))
     covered = min(len(listed), len(named) + unnamed)
     return {
         "id": comp["id"], "name": comp["name"], "domain": comp["domain"], "dc_ip": comp["dc_ip"],
         "subnet": comp["subnet"], "nat_ips": comp["nat_ips"], "notes": comp["notes"],
-        "adComputers": len(comp["computers"]), "devices": len(mine), "online": on, "lastSeen": last,
+        "adComputers": len(listed), "devices": len(mine), "online": on, "lastSeen": last,
+        "dc_user": comp.get("dc_user") or "", "hasPassword": bool(comp.get("has_password")),
+        "agent": agent_state(comp),
         "covered": covered,
         "versions": sorted(([v, n] for v, n in versions.items()), key=lambda x: version_key(x[0]), reverse=True),
         "policy": {"mode": comp["policy_mode"], "whitelist": len(comp["whitelist"]),
@@ -1916,7 +2081,9 @@ def r_company(h, cid):
     with read_db() as c:
         devs = _decorate_devices(_all_devices(c), snap, time.time())
         ips = {r["name"].lower(): dict(r) for r in c.execute("SELECT * FROM computer_ips WHERE company_id=?", (comp["id"],))}
+        adpc = {r["name"].lower(): dict(r) for r in c.execute("SELECT * FROM ad_computers WHERE company_id=?", (comp["id"],))}
         row = c.execute("SELECT dns_status, dns_checked_at, dns_found FROM companies WHERE id=?", (comp["id"],)).fetchone()
+    agent = agent_state(comp)
     s = _company_summary(comp, snap, devs)
     mine = [d for d in devs if d["company_id_effective"] == comp["id"]]
     by_pc = {}
@@ -1926,20 +2093,30 @@ def r_company(h, cid):
 
     def entry(name, listed):
         rec = ips.get(name.lower(), {})
+        ad = adpc.get(name.lower(), {})
         browsers = by_pc.get(name.lower(), [])
-        ip = rec.get("dns_ip") or rec.get("manual_ip") or ""
+        ip = ad.get("ip") or rec.get("dns_ip") or rec.get("manual_ip") or ""
+        status = ("online" if any(b["online"] for b in browsers) else "offline") if browsers else "none"
+        # Power state: the AD agent's reachability check, or a browser checking in right now.
+        power = ""
+        if status == "online":
+            power = "on"
+        elif ad and agent["fresh"]:
+            power = "on" if ad.get("reachable") else "off"
         return {
             "name": name, "listed": listed,
-            "ip": ip, "ipSource": "dns" if rec.get("dns_ip") else ("manual" if ip else ""),
+            "ip": ip, "ipSource": "ad" if ad.get("ip") else ("dns" if rec.get("dns_ip") else ("manual" if ip else "")),
             "manualIp": rec.get("manual_ip") or "",
-            "status": ("online" if any(b["online"] for b in browsers) else "offline") if browsers else "none",
+            "inAd": bool(ad), "os": ad.get("os") or "", "power": power, "lastUp": ad.get("last_up") or "",
+            "status": status,
             "browsers": len(browsers),
             "version": max((b.get("version") or "" for b in browsers), key=version_key, default=""),
             "lastSeen": max((b.get("last_seen") or "" for b in browsers), default=""),
         }
 
-    listed = [entry(n, True) for n in comp["computers"]]
-    known = {n.lower() for n in comp["computers"]}
+    names = company_computers(comp)
+    listed = [entry(n, True) for n in names]
+    known = {n.lower() for n in names}
     extra = [entry(by_pc[k][0]["computer_name"], False) for k in by_pc if k not in known]
     s.update({
         "computers": comp["computers"],
@@ -1948,6 +2125,7 @@ def r_company(h, cid):
         "dns": {"status": row["dns_status"] or "", "checkedAt": row["dns_checked_at"] or "",
                 "found": row["dns_found"] or 0, "total": len(comp["computers"]),
                 "configured": bool(comp["dc_ip"] and comp["domain"])},
+        "agent": agent,
         "manualIps": {k: v["manual_ip"] for k, v in ips.items() if v.get("manual_ip")},
     })
     h.json(200, {"ok": True, "company": s, "globalPolicy": {"mode": snap.policy["enforceMode"]}})
@@ -1958,6 +2136,125 @@ def r_company_resolve(h, cid):
     _company_or_404(cid)
     res = resolve_company(cid)
     h.json(200, {"ok": True, "dns": res})
+
+
+def _company_secret(cid):
+    with read_db() as c:
+        row = c.execute("SELECT dc_user, dc_secret FROM companies WHERE id=?", (cid,)).fetchone()
+    if not row:
+        raise HTTPError(404, "company not found")
+    try:
+        return row["dc_user"] or "", unseal(row["dc_secret"] or "")
+    except (ValueError, RuntimeError):
+        raise HTTPError(409, "the saved password cannot be read (secret.key changed) — enter it again") from None
+
+
+@route("POST", r"/api/companies/(\d+)/password")
+def r_company_password(h, cid):
+    """Show the saved AD password (the eye button in Details). Audited."""
+    comp = _company_or_404(cid)
+    user, pw = _company_secret(comp["id"])
+    with write_db() as c:
+        audit(c, h.user["username"], "company.password.view", comp["name"], None, h.client_ip())
+    h.json(200, {"ok": True, "user": user, "password": pw})
+
+
+@route("POST", r"/api/companies/(\d+)/rdp")
+def r_company_rdp(h, cid):
+    """Connection details for the RDP button: handed to the local fleet-rdp:// helper."""
+    comp = _company_or_404(cid)
+    if not comp["dc_ip"]:
+        raise HTTPError(400, "add the domain controller IP first")
+    user, pw = _company_secret(comp["id"])
+    with write_db() as c:
+        audit(c, h.user["username"], "company.rdp", comp["name"], {"host": comp["dc_ip"]}, h.client_ip())
+    h.json(200, {"ok": True, "host": comp["dc_ip"], "user": user or ("Administrator" if pw else ""), "password": pw})
+
+
+@route("POST", r"/api/companies/(\d+)/agent-token")
+def r_company_agent_token(h, cid):
+    """New token for the AD agent on this company's domain controller (the old one stops working)."""
+    comp = _company_or_404(cid)
+    tok = "fa_" + secrets.token_urlsafe(32)
+    with write_db() as c:
+        c.execute("UPDATE companies SET agent_token=? WHERE id=?", (_token_hash(tok), comp["id"]))
+        audit(c, h.user["username"], "company.agent.token", comp["name"], None, h.client_ip())
+    invalidate()
+    h.json(200, {"ok": True, "token": tok})
+
+
+_AGENT_TOKEN_RE = re.compile(r"^fa_[A-Za-z0-9_-]{20,80}$")
+
+
+@route("POST", "/api/agent/report", auth=False)
+def r_agent_report(h):
+    """The AD agent (tools/ad/fleet-ad.ps1) on a domain controller reports the
+    domain's computers: name, local IP, OS and whether they answer right now.
+    Data only: the response carries nothing for the agent to run."""
+    ip = h.client_ip()
+    if not AGENT_PER_IP.hit(ip):
+        raise HTTPError(429, "too many reports", {"retryAfter": 600})
+    auth = h.headers.get("Authorization") or ""
+    tok = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    if not _AGENT_TOKEN_RE.match(tok):
+        raise HTTPError(401, "agent token required")
+    with read_db() as c:
+        row = c.execute("SELECT id, name FROM companies WHERE agent_token=?", (_token_hash(tok),)).fetchone()
+    if not row:
+        raise HTTPError(401, "unknown agent token — create a new one in the dashboard")
+    cid = row["id"]
+    body = h.body_json(4 * 1024 * 1024)
+    items = body.get("computers")
+    ts = now_iso()
+    info = {"dc": str(body.get("dc") or "")[:64], "domain": str(body.get("domain") or "")[:120],
+            "version": str(body.get("version") or "")[:16], "ip": ip,
+            "error": str(body.get("error") or "")[:300]}
+    if items is None and info["error"]:
+        with write_db() as c:
+            prev = c.execute("SELECT agent_info FROM companies WHERE id=?", (cid,)).fetchone()
+            try:
+                old = json.loads(prev["agent_info"] or "{}")
+            except ValueError:
+                old = {}
+            old.update(info)
+            c.execute("UPDATE companies SET agent_seen=?, agent_info=? WHERE id=?", (ts, json.dumps(old), cid))
+        invalidate()
+        return h.json(200, {"ok": True, "company": row["name"], "computers": None})
+    if not isinstance(items, list) or len(items) > 5000:
+        raise HTTPError(400, "computers must be a list (max 5000)")
+    clean = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()[:64]
+        if not _COMPUTER_RE.match(name):
+            continue
+        addr = str(it.get("ip") or "").strip()
+        try:
+            addr = str(ipaddress.ip_address(addr)) if addr else ""
+        except ValueError:
+            addr = ""
+        clean[name.lower()] = {"name": name, "ip": addr, "os": str(it.get("os") or "").strip()[:80],
+                               "up": it.get("reachable") is True, "logon": str(it.get("lastLogon") or "")[:40]}
+    info["count"] = len(clean)
+    info["up"] = sum(1 for x in clean.values() if x["up"])
+    with write_db() as c:
+        old = {r["name"].lower(): r["last_up"] for r in c.execute(
+            "SELECT name, last_up FROM ad_computers WHERE company_id=?", (cid,))}
+        for k, x in clean.items():
+            c.execute("""INSERT INTO ad_computers (company_id, name, ip, os, reachable, last_up, last_logon, seen_at)
+                         VALUES (?,?,?,?,?,?,?,?)
+                         ON CONFLICT(company_id, name) DO UPDATE SET name=excluded.name, ip=excluded.ip,
+                           os=excluded.os, reachable=excluded.reachable, last_up=excluded.last_up,
+                           last_logon=excluded.last_logon, seen_at=excluded.seen_at""",
+                      (cid, x["name"], x["ip"], x["os"], 1 if x["up"] else 0,
+                       ts if x["up"] else (old.get(k) or ""), x["logon"], ts))
+        for k in old:
+            if k not in clean:
+                c.execute("DELETE FROM ad_computers WHERE company_id=? AND name=?", (cid, k))
+        c.execute("UPDATE companies SET agent_seen=?, agent_info=? WHERE id=?", (ts, json.dumps(info), cid))
+    invalidate()
+    h.json(200, {"ok": True, "company": row["name"], "computers": len(clean)})
 
 
 @route("POST", "/api/companies")
@@ -1984,7 +2281,8 @@ def r_company_update(h, cid):
     clean, errors = validate_company(body, partial=True)
     if errors:
         raise HTTPError(400, "validation failed", {"fields": errors})
-    changed = sorted(k for k in clean if k not in ("whitelist", "blacklist", "policy_mode"))
+    changed = sorted(("dc_password" if k == "dc_secret" else k) for k in clean
+                     if k not in ("whitelist", "blacklist", "policy_mode", "computer_ips"))
     try:
         with write_db() as c:
             row = c.execute("SELECT rev FROM companies WHERE id=?", (comp["id"],)).fetchone()
@@ -2032,6 +2330,7 @@ def r_company_delete(h, cid):
     with write_db() as c:
         c.execute("DELETE FROM companies WHERE id=?", (comp["id"],))
         c.execute("DELETE FROM computer_ips WHERE company_id=?", (comp["id"],))
+        c.execute("DELETE FROM ad_computers WHERE company_id=?", (comp["id"],))
         c.execute("UPDATE devices SET company_id=NULL WHERE company_id=?", (comp["id"],))
         c.execute("UPDATE requests SET company_id=NULL WHERE company_id=? AND status='pending'", (comp["id"],))
         audit(c, h.user["username"], "company.delete", comp["name"], None, h.client_ip())
@@ -2117,7 +2416,7 @@ def r_company_export(h):
         pcs = [("%s %s" % (n, manual[(comp["id"], n.lower())])) if (comp["id"], n.lower()) in manual else n
                for n in comp["computers"]]
         out.append({"name": comp["name"], "domain": comp["domain"], "dc_ip": comp["dc_ip"],
-                    "subnet": comp["subnet"], "nat_ips": comp["nat_ips"], "computers": pcs,
+                    "dc_user": comp.get("dc_user") or "", "subnet": comp["subnet"], "nat_ips": comp["nat_ips"], "computers": pcs,
                     "notes": comp["notes"], "policy_mode": comp["policy_mode"],
                     "whitelist": comp["whitelist"], "blacklist": comp["blacklist"]})
     body = json.dumps(out, ensure_ascii=False, indent=2).encode("utf-8")

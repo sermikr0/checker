@@ -80,24 +80,24 @@ export async function render(page, params, ctx) {
 }
 
 /* Remote desktop to a company's domain controller: the Companies page opens
- * fleet-rdp:// links, which a small helper on this computer hands to xfreerdp. */
+ * fleet-rdp:// links, which a small helper on this computer hands to xfreerdp
+ * (Linux) or Remote Desktop (Windows). The helpers are served by this server. */
 function rdpPanel() {
-  let user = '';
-  try { user = localStorage.getItem('fleet.rdpUser') || ''; } catch (_) { /* ignore */ }
-  const input = h('input', { id: 's-rdp-user', class: 'input', value: user, placeholder: 'Administrator', autocomplete: 'off', spellcheck: 'false' });
-  input.addEventListener('change', () => {
-    try { localStorage.setItem('fleet.rdpUser', input.value.trim()); } catch (_) { /* ignore */ }
-    toast(t('Saved for this browser.'));
-  });
-  const install = 'curl -fsSL https://raw.githubusercontent.com/sermikr0/checker/main/tools/fleet-rdp/install.sh | bash';
+  const origin = window.location.origin;
+  const linux = 'curl -fsSL ' + origin + '/tools/fleet-rdp/install.sh | FLEET_SERVER=' + origin + ' bash';
+  const windows = 'powershell -ExecutionPolicy Bypass -Command "$env:FLEET_SERVER=\'' + origin + '\'; irm ' + origin + '/tools/fleet-rdp/install-windows.ps1 | iex"';
+  const isWin = /Windows/i.test(navigator.userAgent || '');
+  const block = (label, cmd, hint) => h('div', { class: 'field' }, h('span', { class: 'field-label' }, label),
+    h('pre', { class: 'code' }, cmd, copyBtn(cmd)), h('div', { class: 'field-hint' }, hint));
+  const ubuntu = block(t('Ubuntu / Linux — in a terminal'), linux,
+    t('Needs xfreerdp (sudo apt install freerdp3-x11, or freerdp2-x11 on older systems).'));
+  const win = block(t('Windows — in PowerShell'), windows,
+    t('Opens Remote Desktop (mstsc). Run it as administrator once if Remote Desktop still asks for the password.'));
   return h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', null, t('Remote desktop')),
-      h('p', null, t('The RDP button next to each company opens xfreerdp to its domain controller with dynamic resolution.'))),
+      h('p', null, t('The RDP button next to each company connects to its domain controller at once, with dynamic resolution.'))),
     h('div', { class: 'panel-body', style: { display: 'grid', gap: '14px' } },
-      h('div', { class: 'field' }, h('label', { for: 's-rdp-user' }, t('RDP user name')), input,
-        h('div', { class: 'field-hint' }, t('Sent with the AD domain of the company. The password is typed in the terminal that opens.'))),
-      h('div', { class: 'field' }, h('span', { class: 'field-label' }, t('One-time setup on this Linux computer')),
-        h('pre', { class: 'code' }, install, copyBtn(install)),
-        h('div', { class: 'field-hint' }, t('Needs xfreerdp (sudo apt install freerdp2-x11 or freerdp3-x11). The helper only connects to private addresses and asks before connecting.')))));
+      isWin ? win : ubuntu, isWin ? ubuntu : win,
+      h('div', { class: 'field-hint' }, t('The button uses the user name and password saved in the company’s Details. For a company without a saved password, the helper asks once for a user name and password and keeps them only on this computer. It connects only to private addresses, and the browser asks once before opening it.'))));
 }
 

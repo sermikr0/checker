@@ -20,48 +20,64 @@ export function companyFields(c = {}) {
     { name: 'name', label: t('Company name'), value: c.name || '', span: true },
     { name: 'domain', label: t('AD domain'), value: c.domain || '', placeholder: 'office.local', mono: true },
     { name: 'dc_ip', label: t('Domain controller IP'), value: c.dc_ip || '', placeholder: '10.118.0.10', mono: true },
+    { name: 'dc_user', label: t('DC user name'), value: c.dc_user || '', placeholder: 'Administrator', mono: true, hint: t('Used by the RDP button together with the DC password.') },
     { name: 'subnet', label: t('Office subnet'), value: c.subnet || '', placeholder: '10.118', mono: true, hint: t('Short form 10.118 or CIDR 10.118.0.0/16.') },
     { name: 'nat_ips', label: t('NAT addresses'), type: 'textarea', rows: 3, mono: true, value: (c.nat_ips || []).join('\n'),
       placeholder: '203.0.113.10', hint: t('Public IPs of the office router, one per line. Ranges like 203.0.113.0/29 work too.') },
     { name: 'computers', label: t('AD computers'), type: 'textarea', rows: 6, mono: true, value: (c.computers || []).join('\n'),
-      hint: t('One computer per line. Add the local IP after the name (PC-01 10.118.5.20) only if AD DNS cannot be reached.'), span: true },
+      hint: t('Not needed when the AD agent is installed: it fills the list itself. One computer per line; an IP after the name (PC-01 10.118.5.20) only if it cannot be found.'), span: true },
     { name: 'notes', label: t('Notes'), type: 'textarea', rows: 2, value: c.notes || '', span: true },
   ];
 }
 
 export function companyPayload(v) {
   const lines = (s) => String(s || '').split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
-  return { name: v.name, domain: v.domain, dc_ip: v.dc_ip, subnet: v.subnet, nat_ips: lines(v.nat_ips), computers: lines(v.computers), notes: v.notes };
+  return { name: v.name, domain: v.domain, dc_ip: v.dc_ip, dc_user: v.dc_user || '', subnet: v.subnet, nat_ips: lines(v.nat_ips), computers: lines(v.computers), notes: v.notes };
 }
 
-/* Remote desktop to the company's domain controller through the local
- * fleet-rdp:// handler (tools/fleet-rdp), which runs xfreerdp /dynamic-resolution. */
-export function rdpHref(c) {
-  let user = '';
-  try { user = localStorage.getItem('fleet.rdpUser') || ''; } catch (_) { /* ignore */ }
-  const q = new URLSearchParams({ host: c.dc_ip });
-  if (c.domain) q.set('domain', c.domain);
-  if (user) q.set('user', user);
+/* Remote desktop to the company's domain controller through the fleet-rdp://
+ * handler installed on this computer (tools/fleet-rdp): xfreerdp on Linux,
+ * Remote Desktop (mstsc) on Windows, both with dynamic resolution. When the
+ * company has a saved password the button fetches it (audited) and hands it to
+ * the handler; otherwise the handler uses the credentials saved on the computer. */
+export function rdpHref(c, cred) {
+  const q = new URLSearchParams({ host: (cred && cred.host) || c.dc_ip });
+  if (cred && cred.password) {
+    q.set('user', cred.user || 'Administrator');
+    q.set('pass', cred.password);
+  }
   return 'fleet-rdp://connect?' + q.toString();
+}
+
+function rdpHint() {
+  try {
+    if (!sessionStorage.getItem('fleet.rdpHint')) {
+      sessionStorage.setItem('fleet.rdpHint', '1');
+      toast(t('If nothing opens, install the RDP helper once: Settings → Remote desktop.'), 'info');
+    }
+  } catch (_) { /* ignore */ }
 }
 
 export function rdpButton(c, { large = false } = {}) {
   const size = large ? 16 : 14;
+  const cls = 'btn btn--quiet' + (large ? '' : ' btn--sm');
+  const label = large ? t('Connect to AD') : 'RDP';
   if (!c.dc_ip) {
-    return h('button', { class: 'btn btn--quiet' + (large ? '' : ' btn--sm'), type: 'button', disabled: true, title: t('Add the domain controller IP in Details to connect.') },
-      icon('monitor', size), large ? t('Connect to AD') : 'RDP');
+    return h('button', { class: cls, type: 'button', disabled: true, title: t('Add the domain controller IP in Details to connect.') },
+      icon('monitor', size), label);
   }
-  return h('a', { class: 'btn btn--quiet' + (large ? '' : ' btn--sm'), href: rdpHref(c),
-    title: t('Connect to {dc} with xfreerdp (dynamic resolution)', { dc: c.dc_ip }),
-    onclick: (e) => {
+  return h('a', { class: cls, href: rdpHref(c),
+    title: t('Remote desktop to {dc} (dynamic resolution)', { dc: c.dc_ip }),
+    onclick: async (e) => {
       e.stopPropagation();
+      rdpHint();
+      if (!c.hasPassword) return;          // the link itself opens the handler
+      e.preventDefault();
       try {
-        if (!sessionStorage.getItem('fleet.rdpHint')) {
-          sessionStorage.setItem('fleet.rdpHint', '1');
-          toast(t('If nothing opens, install the RDP helper once: Settings → Remote desktop.'), 'info');
-        }
-      } catch (_) { /* ignore */ }
-    } }, icon('monitor', size), large ? t('Connect to AD') : 'RDP');
+        const cred = await post('/api/companies/' + c.id + '/rdp');
+        window.location.href = rdpHref(c, cred);
+      } catch (err) { toast(errText(err), 'error'); }
+    } }, icon('monitor', size), label);
 }
 
 const isPrivate = (ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1|fc|fd)/i.test(ip || '');
