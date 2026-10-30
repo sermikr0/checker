@@ -23,8 +23,8 @@ export function companyFields(c = {}) {
     { name: 'subnet', label: t('Office subnet'), value: c.subnet || '', placeholder: '10.118', mono: true, hint: t('Short form 10.118 or CIDR 10.118.0.0/16.') },
     { name: 'nat_ips', label: t('NAT addresses'), type: 'textarea', rows: 3, mono: true, value: (c.nat_ips || []).join('\n'),
       placeholder: '203.0.113.10', hint: t('Public IPs of the office router, one per line. Ranges like 203.0.113.0/29 work too.') },
-    { name: 'computers', label: t('AD computers'), type: 'textarea', rows: 4, mono: true, value: (c.computers || []).join('\n'),
-      hint: t('One computer name per line. Used to measure coverage.'), span: true },
+    { name: 'computers', label: t('AD computers'), type: 'textarea', rows: 6, mono: true, value: (c.computers || []).join('\n'),
+      hint: t('One computer per line. Add the local IP after the name (PC-01 10.118.5.20) only if AD DNS cannot be reached.'), span: true },
     { name: 'notes', label: t('Notes'), type: 'textarea', rows: 2, value: c.notes || '', span: true },
   ];
 }
@@ -32,6 +32,36 @@ export function companyFields(c = {}) {
 export function companyPayload(v) {
   const lines = (s) => String(s || '').split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
   return { name: v.name, domain: v.domain, dc_ip: v.dc_ip, subnet: v.subnet, nat_ips: lines(v.nat_ips), computers: lines(v.computers), notes: v.notes };
+}
+
+/* Remote desktop to the company's domain controller through the local
+ * fleet-rdp:// handler (tools/fleet-rdp), which runs xfreerdp /dynamic-resolution. */
+export function rdpHref(c) {
+  let user = '';
+  try { user = localStorage.getItem('fleet.rdpUser') || ''; } catch (_) { /* ignore */ }
+  const q = new URLSearchParams({ host: c.dc_ip });
+  if (c.domain) q.set('domain', c.domain);
+  if (user) q.set('user', user);
+  return 'fleet-rdp://connect?' + q.toString();
+}
+
+export function rdpButton(c, { large = false } = {}) {
+  const size = large ? 16 : 14;
+  if (!c.dc_ip) {
+    return h('button', { class: 'btn btn--quiet' + (large ? '' : ' btn--sm'), type: 'button', disabled: true, title: t('Add the domain controller IP in Details to connect.') },
+      icon('monitor', size), large ? t('Connect to AD') : 'RDP');
+  }
+  return h('a', { class: 'btn btn--quiet' + (large ? '' : ' btn--sm'), href: rdpHref(c),
+    title: t('Connect to {dc} with xfreerdp (dynamic resolution)', { dc: c.dc_ip }),
+    onclick: (e) => {
+      e.stopPropagation();
+      try {
+        if (!sessionStorage.getItem('fleet.rdpHint')) {
+          sessionStorage.setItem('fleet.rdpHint', '1');
+          toast(t('If nothing opens, install the RDP helper once: Settings → Remote desktop.'), 'info');
+        }
+      } catch (_) { /* ignore */ }
+    } }, icon('monitor', size), large ? t('Connect to AD') : 'RDP');
 }
 
 const isPrivate = (ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1|fc|fd)/i.test(ip || '');
@@ -57,7 +87,7 @@ export async function render(page, params, ctx) {
 
   page.append(h('header', { class: 'page-head' },
     h('div', { class: 'titles' }, h('h1', { class: 'page-title' }, t('Companies')),
-      h('p', { class: 'page-sub' }, t('Every office, its browsers and its own blocking rules. Open a company to change its policy.'))),
+      h('p', { class: 'page-sub' }, t('Every office with its computers and browsers. Open a company to see its computers, their local IPs and status.'))),
     h('div', { class: 'page-actions' },
       h('button', { class: 'btn btn--quiet', type: 'button', onclick: () => fileInput.click() }, icon('upload', 16), t('Import')),
       h('a', { class: 'btn btn--quiet', href: '/api/companies/export', download: '' }, icon('download', 16), t('Export')),
@@ -99,14 +129,15 @@ export async function render(page, params, ctx) {
     { key: 'devices', label: t('Browsers'), sort: (c) => c.devices, defaultDir: 'desc',
       render: (c) => h('div', { class: 'lane-cell' }, lane(c.online, c.devices),
         h('span', { class: 'counts' }, c.devices ? [h('b', null, num(c.online)), ' ', t('online of {n}', { n: num(c.devices) })] : t('No devices yet'))) },
-    { key: 'coverage', label: t('Coverage'), sort: (c) => (c.adComputers ? c.devices / c.adComputers : -1), defaultDir: 'desc',
-      render: (c) => (c.adComputers ? meter(c.devices, c.adComputers, t('{n} of {m} AD computers', { n: num(c.devices), m: num(c.adComputers) })) : h('span', { class: 'muted' }, t('No AD list'))) },
+    { key: 'coverage', label: t('Coverage'), sort: (c) => (c.adComputers ? c.covered / c.adComputers : -1), defaultDir: 'desc',
+      render: (c) => (c.adComputers ? meter(c.covered, c.adComputers, t('{n} of {m} AD computers', { n: num(c.covered), m: num(c.adComputers) })) : h('span', { class: 'muted' }, t('No AD list'))) },
     { key: 'policy', label: t('Policy'), sort: (c) => ({ off: 0, blacklist: 1, whitelist: 2 }[c.policy.effectiveMode] ?? 0),
       render: (c) => [plate(c.policy.effectiveMode, { size: 'sm' }),
         FILTERS.custom(c) ? h('span', { class: 'plate-note' }, t('own policy')) : null] },
     { key: 'requests', label: t('Requests'), sort: (c) => c.pendingRequests, defaultDir: 'desc', class: 'num',
       render: (c) => (c.pendingRequests ? h('span', { class: 'badge badge--warn' }, num(c.pendingRequests)) : h('span', { class: 'muted' }, '—')) },
     { key: 'seen', label: t('Last check-in'), sort: (c) => c.lastSeen || '', defaultDir: 'desc', render: (c) => when(c.lastSeen) },
+    { key: 'rdp', label: '', class: 'actions', render: (c) => rdpButton(c) },
   ];
 
   function paintBoard() {

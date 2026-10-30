@@ -92,6 +92,33 @@ sudo journalctl -u url-fleet -f
 Put a TLS reverse proxy in front before exposing it beyond the LAN. With
 nginx use `FLEET_TRUST_PROXY=xff`; with direct LAN access use `none`.
 
+## Computer names and statuses (extension 2.4.0)
+
+The Company page shows each AD computer as *online*, *offline* or *no
+extension*. For that the extension must know the Windows computer name, which
+browsers cannot read themselves. IT sets it as an extension policy:
+
+* **Group Policy (recommended)** — Computer Configuration → Preferences →
+  Windows Settings → Registry → New Registry Item:
+  * Hive: `HKEY_LOCAL_MACHINE`
+  * Key path: `Software\Policies\Google\Chrome\3rdparty\extensions\lddmakdihlenfbmdpggpahjooglgigoi\policy`
+  * Value name: `computerName`, type `REG_SZ`, value data: `%ComputerName%`
+* **One computer by hand** (cmd as administrator; `%COMPUTERNAME%` is expanded by cmd):
+  ```
+  reg add "HKLM\Software\Policies\Google\Chrome\3rdparty\extensions\lddmakdihlenfbmdpggpahjooglgigoi\policy" /v computerName /t REG_SZ /d "%COMPUTERNAME%" /f
+  ```
+
+Chrome picks the policy up within minutes (or at once from `chrome://policy` →
+*Reload policies*). The popup's Settings tab shows the computer name it sends.
+
+## Local IPs from AD DNS
+
+Every 15 minutes the server asks each company's DC (`dc_ip`, port 53) for
+`<computer>.<AD domain>`. The container must be able to reach the DCs — check
+from the host with `dig @10.111.0.5 shod.local` (or `nslookup shod.local 10.111.0.5`).
+If a DC is unreachable the Company page says so; IPs can then be typed into
+the computer list as `PC-01 10.111.5.20`.
+
 ## Companies
 
 Add companies in the dashboard, or import a JSON file (Companies → Import) in

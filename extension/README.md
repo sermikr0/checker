@@ -6,7 +6,7 @@ trucking companies: fake DAT / Truckstop / Highway logins, "renew your USDOT
 registration" fraud, rate-confirmation and BOL attachments that are really
 malware, carrier-packet lures, and "we changed our bank account" invoice fraud.
 
-Version 2.3.0, Manifest V3, no build step, no dependencies.
+Version 2.4.0, Manifest V3, no build step, no dependencies.
 
 ## Install (unpacked)
 
@@ -137,6 +137,14 @@ folder) runs the verdict suite against `analyzer.js`.
   cannot be scanned.
 - Scores are heuristics. A Caution on your own partner's new domain is normal;
   add it to the allowlist.
+
+## Changes in 2.4.0
+
+- Reads the Windows computer name from Chrome extension policy
+  (`computerName`, schema in `managed_schema.json`) and sends it with the
+  heartbeat, so the fleet dashboard can show each AD computer as online or
+  offline. Without the policy nothing changes. The popup's Settings tab shows
+  the name being sent.
 
 ## Changes in 2.3.0
 

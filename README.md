@@ -5,11 +5,11 @@ extension: anti-phishing for logistics offices plus central web filtering,
 with a separate policy per company.
 
 ```
-extension/        Chrome MV3 extension (v2.3.0)
+extension/        Chrome MV3 extension (v2.4.0)
 server.py         Fleet server — Python 3.11+ standard library only, SQLite
 web/              Admin dashboard (no build step, served by server.py)
 tests/            End-to-end server tests (python3 -m unittest discover -s tests)
-tools/            Helper scripts (i18n_check.py)
+tools/            i18n_check.py; fleet-rdp/ (xfreerdp link handler for the RDP buttons)
 pack_crx.py       Packs and signs the extension as CRX3
 companies.example.json   Format for importing companies
 ```
@@ -30,18 +30,46 @@ delivery, access requests, self-hosted Chrome updates, audit log.
 | Page | |
 |---|---|
 | Overview | Who is online, the fleet board (one lane per company), versions, recent activity |
-| Companies | Search, filter (with browsers, offline, own policy, pending requests, empty), sort; link unknown addresses to a company |
-| Company | Browsers, **own policy** (mode + allowed/blocked lists with a live preview of what browsers receive), AD computers, details |
-| Devices | Filter by status, company, version; rename, pin to a company, bulk delete, CSV export |
-| Global policy | Default mode and lists for everyone |
-| Access requests | Allow / reject / block, for the requester's company or for everyone; history |
-| Updates | Upload a signed CRX, rollout progress, install snippets |
+| Companies | Search, filter, sort; an **RDP** button per company opens xfreerdp to its domain controller; link unknown addresses to a company |
+| Company | The AD **computer list**: local IP (from the company's AD DNS), extension status online / offline / not installed, version, last check-in; details |
+| Global policy | Mode and allowed / blocked lists for everyone |
+| Access requests | Allow / reject / block (global lists); history |
+| Updates | Upload a signed CRX |
 | Activity log | Every admin action with who and from where |
 | Settings | Password, sessions, theme, language |
 
-## Per-company policy
+## Computers, local IPs and status
 
-Every browser receives the **effective** policy of its company:
+* **Local IP** — the server looks every AD computer up in the company's own DNS
+  (`<name>.<AD domain>` asked from the DC IP) every 15 minutes and on
+  *Refresh IPs*. The fleet server needs a route to the offices' DCs (VPN). If a
+  DC cannot be reached, IPs can be typed in the company details as
+  `PC-01 10.118.5.20`.
+* **Status** — extension 2.4.0 reports the Windows computer name that IT sets
+  through Chrome policy (`computerName`, see DEPLOYMENT.md). A computer is
+  *online* when one of its browsers checked in during the last 3 minutes,
+  *offline* otherwise, and *no extension* if no browser reported its name.
+* The computer name also assigns the browser to its company, before NAT and subnet.
+
+## RDP to a company's domain controller
+
+The RDP button opens `fleet-rdp://connect?host=<DC IP>&domain=<AD domain>&user=<name>`.
+Install the handler once per Linux admin computer:
+
+```bash
+bash tools/fleet-rdp/install.sh      # needs xfreerdp (freerdp3-x11 or freerdp2-x11)
+```
+
+It opens a terminal, shows the target, and runs
+`xfreerdp /v:<DC> /d:<domain> /u:<user> /dynamic-resolution +clipboard /cert:tofu`.
+Only private addresses are accepted. The user name is set per browser in
+Settings → Remote desktop.
+
+## Company policy (server)
+
+The dashboard edits the global policy only. Rules a company got earlier are
+listed on the Global policy page and can be removed there. The server still
+merges them for that company's browsers:
 
 * **Mode** — a company either follows the global mode or sets its own
   (*all sites open*, *blacklist*, *whitelist only*).
@@ -50,8 +78,8 @@ Every browser receives the **effective** policy of its company:
   `allowed = (global allowed − company blocked) + company allowed`,
   `blocked = (global blocked − company allowed) + company blocked`.
 
-A browser belongs to a company by, in order: a manual pin → a NAT address
-(single IP or CIDR range) → the office subnet. If two companies share a subnet
+A browser belongs to a company by, in order: a manual pin → its computer name
+in the company's AD list → a NAT address (single IP or CIDR range) → the office subnet. If two companies share a subnet
 the device is marked *ambiguous* and gets the global policy until it is pinned
 or the NAT address is added.
 
@@ -75,6 +103,8 @@ Cloudflare Tunnel setup: see [DEPLOYMENT.md](DEPLOYMENT.md).
 | `FLEET_APPID` | `lddmakdihlenfbmdpggpahjooglgigoi` | Extension ID accepted for CRX uploads |
 | `FLEET_TLS_CERT` / `FLEET_TLS_KEY` / `FLEET_TLS_PORT` | — / — / `8443` | Optional extra HTTPS listener |
 | `FLEET_LOG_HEARTBEATS` | `0` | `1` logs every heartbeat request |
+| `FLEET_DNS_INTERVAL` | `900` | Seconds between AD DNS lookups of computer IPs (`0` = only on *Refresh IPs*) |
+| `FLEET_DNS_TIMEOUT` / `FLEET_DNS_PORT` | `1.0` / `53` | DNS query timeout and port |
 
 ## Security model
 
@@ -97,7 +127,7 @@ Cloudflare Tunnel setup: see [DEPLOYMENT.md](DEPLOYMENT.md).
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests -v   # 36 tests: sessions, policy merge, requests, keep-alive, v2 → v3 migration
+python3 -m unittest discover -s tests -v   # 46 tests: sessions, policy, requests, keep-alive, migration, AD DNS, computers, RDP links
 python3 tools/i18n_check.py                # every dashboard string has an Uzbek translation
 ```
 

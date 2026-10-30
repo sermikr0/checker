@@ -1,29 +1,24 @@
-import { h, icon, replace, browserOf } from '../dom.js';
+import { h, icon, replace } from '../dom.js';
 import { api, post } from '../api.js';
 import { t, tn, num } from '../i18n.js';
 import {
-  plate, status, when, empty, meter, formDialog, confirmDialog, toast, errText, matchInfo, domainEditor, MODE_LABEL, searchBox,
+  plate, when, empty, meter, formDialog, confirmDialog, toast, errText, searchBox, chips, sortableHead, sortRows,
 } from '../ui.js';
-import { loading, failed, versionTag } from './common.js';
-import { companyFields, companyPayload } from './companies.js';
+import { loading, failed } from './common.js';
+import { companyFields, companyPayload, rdpButton } from './companies.js';
 
-const TABS = ['devices', 'policy', 'computers', 'details'];
+const TABS = ['computers', 'details'];
 
 export async function render(page, params, ctx) {
   const id = Number(params[0]);
-  let tab = TABS.includes(params[1]) ? params[1] : 'devices';
+  let tab = TABS.includes(params[1]) ? params[1] : 'computers';
   let c = null;
-  let globalPolicy = null;
-  let release = null;
-  let dirty = false;
+  const pcState = { q: '', filter: 'all', sort: { key: 'name', dir: 'asc' } };
 
   page.append(loading());
 
   async function fetchAll() {
-    const [cr, pr, rr] = await Promise.all([api('/api/companies/' + id), api('/api/policy'), api('/api/releases').catch(() => null)]);
-    c = cr.company;
-    globalPolicy = pr.policy;
-    release = rr && rr.release;
+    c = (await api('/api/companies/' + id)).company;
   }
 
   try {
@@ -39,13 +34,21 @@ export async function render(page, params, ctx) {
 
   async function staleReload() {
     const ok = await confirmDialog({ title: t('Changed somewhere else'), body: t('This company was changed after you opened it — for example, a request was approved. Load the latest version? Your unsaved edits will be lost.'), confirm: t('Load latest') });
-    if (!ok) return;
-    setDirty(false);
-    await reload();
+    if (ok) await reload();
+  }
+
+  function counts() {
+    const listed = c.computerList.filter((p) => p.listed);
+    return {
+      total: listed.length,
+      online: listed.filter((p) => p.status === 'online').length,
+      installed: listed.filter((p) => p.status !== 'none').length,
+      withIp: listed.filter((p) => p.ip).length,
+    };
   }
 
   function header() {
-    const eff = c.policyDetail.effective;
+    const k = counts();
     const natChips = h('div', { class: 'ipchips' },
       c.nat_ips.length ? c.nat_ips.map((ip) => h('span', { class: 'ipchip' }, ip,
         h('button', { type: 'button', title: t('Remove {d}', { d: ip }), 'aria-label': t('Remove {d}', { d: ip }), onclick: () => removeNat(ip) }, icon('x', 13))))
@@ -57,14 +60,12 @@ export async function render(page, params, ctx) {
         h('div', { class: 'titles' },
           h('h1', { class: 'page-title' }, c.name),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px', flexWrap: 'wrap' } },
-            plate(eff.mode),
-            h('span', { class: 'ink-2' }, eff.modeSource === 'company' ? t('Own policy mode') : t('Follows the global policy')),
-            c.pendingRequests || c.requests.length ? h('a', { class: 'badge badge--warn', href: '#/requests' }, tn(c.requests.length, '{n} request waiting', '{n} requests waiting')) : null)),
-        h('div', { class: 'page-actions' },
-          h('a', { class: 'btn btn--quiet', href: '#/devices?company=' + c.id, onclick: (e) => { e.preventDefault(); sessionStorage.setItem('fleet.devices', JSON.stringify({ company: String(c.id) })); ctx.navigate('#/devices'); } }, icon('monitor', 16), t('Open in Devices')))),
+            plate(c.policy.effectiveMode),
+            h('span', { class: 'ink-2' }, c.policy.modeSource === 'company' ? t('Own policy mode') : t('Follows the global policy')))),
+        h('div', { class: 'page-actions' }, rdpButton(c, { large: true }))),
       h('dl', { class: 'facts' },
-        fact(t('Browsers'), c.devices ? t('{on} online of {n}', { on: num(c.online), n: num(c.devices) }) : t('none yet')),
-        c.adComputers ? h('div', { style: { minWidth: '180px' } }, h('dt', null, t('Coverage')), h('dd', null, meter(c.devices, c.adComputers, t('{n} of {m} AD computers', { n: num(c.devices), m: num(c.adComputers) })))) : null,
+        fact(t('Computers'), k.total ? t('{on} online, {inst} with the extension, {n} in AD', { on: num(k.online), inst: num(k.installed), n: num(k.total) }) : t('none yet')),
+        k.total ? h('div', { style: { minWidth: '180px' } }, h('dt', null, t('Coverage')), h('dd', null, meter(k.installed, k.total, t('{n} of {m} computers have the extension', { n: num(k.installed), m: num(k.total) })))) : null,
         fact(t('AD domain'), c.domain || '—', true),
         fact(t('Domain controller'), c.dc_ip || '—', true),
         fact(t('Subnet'), c.subnet || '—', true),
@@ -90,214 +91,115 @@ export async function render(page, params, ctx) {
 
   const tabsEl = h('div', { class: 'tabs', role: 'tablist' });
   function paintTabs() {
-    const labels = {
-      devices: [t('Browsers'), c.devices],
-      policy: [t('Policy'), null],
-      computers: [t('AD computers'), c.adComputers],
-      details: [t('Details'), null],
-    };
+    const labels = { computers: [t('Computers'), c.computerList.filter((p) => p.listed).length], details: [t('Details'), null] };
     replace(tabsEl, TABS.map((k) => h('button', { role: 'tab', type: 'button', 'aria-selected': String(k === tab), onclick: () => switchTab(k) },
       labels[k][0], labels[k][1] != null ? h('span', { class: 'count' }, num(labels[k][1])) : null)));
   }
   function switchTab(k) {
     if (k === tab) return;
-    if (dirty && !window.confirm(t('Discard unsaved policy changes?'))) return;
-    setDirty(false);
     tab = k;
-    history.replaceState(null, '', '#/companies/' + id + (k === 'devices' ? '' : '/' + k));
+    history.replaceState(null, '', '#/companies/' + id + (k === 'computers' ? '' : '/' + k));
     paintTabs();
     paintTab();
   }
-
-  function setDirty(v) {
-    dirty = v;
-    ctx.setGuard(v ? () => window.confirm(t('Discard unsaved policy changes?')) : null);
-    window.onbeforeunload = v ? () => true : null;
-  }
-
   function paintTab() {
-    if (tab === 'devices') replace(tabHost, devicesTab());
-    else if (tab === 'policy') replace(tabHost, policyTab());
-    else if (tab === 'computers') replace(tabHost, computersTab());
+    if (tab === 'computers') paintComputers();
     else replace(tabHost, detailsTab());
   }
 
-  /* ── Browsers tab ── */
-  function devicesTab() {
-    const list = c.deviceList;
-    if (!list.length) {
-      return h('section', { class: 'panel' }, empty('monitor', t('No browsers from this company yet'),
-        c.nat_ips.length || c.subnet ? t('Browsers appear here after their first check-in from {where}.', { where: [...c.nat_ips, c.subnet].filter(Boolean).join(', ') })
-          : t('Add the office’s NAT address so its browsers can be recognised.'),
-        c.nat_ips.length ? null : h('button', { class: 'btn', onclick: addNat }, icon('plus', 16), t('Add address'))));
-    }
-    const latest = release && release.version;
-    return h('section', { class: 'panel panel--flush' }, h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
-      h('thead', null, h('tr', null, [t('Status'), t('Name'), t('Address'), t('Matched'), t('Version'), t('Browser'), t('Last check-in'), ''].map((x) => h('th', null, x)))),
-      h('tbody', null, list.map((d) => h('tr', null,
-        h('td', null, status(d.online)),
-        h('td', null, h('b', null, d.label || ''), h('span', { class: 'cell-sub data' }, d.device_id.slice(0, 13))),
-        h('td', { class: 'data' }, d.last_ip),
-        h('td', null, matchInfo(d)),
-        h('td', null, versionTag(d.version, latest)),
-        h('td', { class: 'nowrap' }, browserOf(d.user_agent) || h('span', { class: 'muted' }, '—')),
-        h('td', { class: 'nowrap' }, when(d.last_seen)),
-        h('td', { class: 'actions' }, d.match === 'pinned'
-          ? h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: async () => {
-            try { await post('/api/devices/update', { deviceIds: [d.device_id], companyId: null }); toast(t('Pin removed.')); reload(); } catch (e) { toast(errText(e), 'error'); }
-          } }, icon('pin', 14), t('Unpin')) : null)))))));
-  }
+  /* ── Computers: AD list with local IP and extension status ── */
+  const STATUS = {
+    online: () => h('span', { class: 'status status--on' }, t('Online')),
+    offline: () => h('span', { class: 'status status--off' }, t('Offline')),
+    none: () => h('span', { class: 'muted' }, t('No extension')),
+  };
+  const FILTERS = {
+    all: () => true,
+    online: (p) => p.status === 'online',
+    offline: (p) => p.status === 'offline',
+    none: (p) => p.status === 'none',
+    noip: (p) => !p.ip,
+  };
+  const pcHost = h('div');
+  const pcToolbar = h('div', { class: 'toolbar' });
+  const dnsLine = h('div');
 
-  /* ── Policy tab ── */
-  function policyTab() {
-    const pd = c.policyDetail;
-    let mode = pd.mode;
-    let wl = [...pd.whitelist];
-    let bl = [...pd.blacklist];
-    const orig = JSON.stringify([pd.mode, pd.whitelist, pd.blacklist]);
-    const changed = () => {
-      setDirty(JSON.stringify([mode, wl, bl]) !== orig);
-      paintSaveBar();
-      paintPreview();
-    };
-
-    const opts = [
-      ['inherit', t('Uses the global mode, now: {mode}.', { mode: MODE_LABEL[globalPolicy.enforceMode]() })],
-      ['off', t('Nothing is blocked for this company, whatever the global mode is.')],
-      ['blacklist', t('Only the blocked list is stopped. Everything else opens.')],
-      ['whitelist', t('Everything is blocked except the allowed list. For strict offices.')],
-    ];
-    const picker = h('div', { class: 'plate-picker', role: 'radiogroup', 'aria-label': t('Policy mode'), style: { '--n': 4 } });
-    function paintPicker() {
-      replace(picker, opts.map(([m, desc]) => h('button', { type: 'button', class: 'plate-option', role: 'radio', 'aria-checked': String(m === mode),
-        onclick: () => { mode = m; paintPicker(); changed(); } },
-      h('span', { class: 'tick' }, icon('check', 14)), plate(m), h('span', { class: 'desc' }, desc))));
-    }
-    paintPicker();
-
-    const allow = domainEditor({ title: t('Allowed for {company}', { company: c.name }), tone: 'allow', items: wl,
-      hint: t('Added to the global allowed list. Wins over the same domain on the global blocked list.'), onChange: (l) => { wl = l; changed(); } });
-    const block = domainEditor({ title: t('Blocked for {company}', { company: c.name }), tone: 'block', items: bl,
-      hint: t('Added to the global blocked list. Wins over the same domain on the global allowed list.'), onChange: (l) => { bl = l; changed(); } });
-
-    const preview = h('div', { class: 'effective' });
-    function paintPreview() {
-      const gwl = globalPolicy.whitelist, gbl = globalPolicy.blacklist;
-      const effMode = mode === 'inherit' ? globalPolicy.enforceMode : mode;
-      const ewl = [...wl, ...gwl.filter((d) => !bl.includes(d) && !wl.includes(d))];
-      const ebl = [...bl, ...gbl.filter((d) => !wl.includes(d) && !bl.includes(d))];
-      const shadowed = effMode === 'blacklist' ? wl.map((d) => [d, ebl.find((p) => d !== p && d.endsWith('.' + p))]).filter((x) => x[1]) : [];
-      const overridden = [...gwl.filter((d) => bl.includes(d)), ...gbl.filter((d) => wl.includes(d))];
-      const tags = (arr, own) => (arr.length
-        ? h('div', { class: 'tag-list' }, arr.slice(0, 60).map((d) => h('span', { class: 'tag' + (own.includes(d) ? ' tag--company' : ''), title: own.includes(d) ? t('From this company') : t('From the global policy') }, d)),
-          arr.length > 60 ? h('span', { class: 'muted' }, t('and {n} more', { n: arr.length - 60 })) : null)
-        : h('span', { class: 'muted' }, t('empty')));
-      let explain;
-      if (effMode === 'off') explain = h('p', { class: 'ink-2', style: { margin: 0 } }, t('Browsers in this company open every site. The lists are kept but not enforced.'));
-      else if (effMode === 'blacklist') explain = [h('div', { class: 'field-label' }, tn(ebl.length, '{n} blocked domain', '{n} blocked domains')), tags(ebl, bl)];
-      else explain = [h('div', { class: 'field-label' }, tn(ewl.length, 'Only {n} domain opens', 'Only {n} domains open')), tags(ewl, wl),
-        !ewl.length ? h('div', { class: 'note note--warn' }, icon('alert', 16), t('The allowed list is empty: every site will be blocked for this company.')) : null];
-      replace(preview,
-        h('div', { class: 'row' }, plate(effMode), h('span', { class: 'ink-2' }, mode === 'inherit' ? t('from the global policy') : t('set for this company'))),
-        explain,
-        shadowed.length ? h('div', { class: 'note note--warn' }, icon('alert', 16), h('div', null,
-          shadowed.map(([d, p]) => h('div', null, t('{d} stays blocked because {parent} is on the blocked list.', { d, parent: p }))))) : null,
-        c.policyDetail.effective.truncated ? h('div', { class: 'note note--warn' }, icon('alert', 16), t('The combined list is longer than a browser accepts; the oldest global entries are left out. Shorten the global lists.')) : null,
-        overridden.length ? h('div', null, h('div', { class: 'field-label' }, t('Global entries this company overrides')),
-          h('div', { class: 'tag-list', style: { marginTop: '6px' } }, overridden.map((d) => h('span', { class: 'tag tag--strike' }, d)))) : null);
-    }
-    paintPreview();
-
-    const saveHost = h('div');
-    function paintSaveBar() {
-      if (!dirty) { replace(saveHost); return; }
-      replace(saveHost, h('div', { class: 'savebar', role: 'region', 'aria-label': t('Unsaved changes') },
-        icon('info', 18), h('span', null, t('Unsaved changes. Browsers get them within a minute of saving.')), h('span', { class: 'spacer' }),
-        h('button', { class: 'btn btn--quiet', type: 'button', onclick: () => { setDirty(false); paintTab(); } }, t('Discard')),
-        h('button', { class: 'btn', type: 'button', onclick: savePolicy }, icon('check', 16), t('Save policy'))));
-    }
-    async function savePolicy() {
-      const effMode = mode === 'inherit' ? globalPolicy.enforceMode : mode;
-      const effAllowed = [...globalPolicy.whitelist.filter((d) => !bl.includes(d)), ...wl];
-      if (effMode === 'whitelist' && !effAllowed.length) {
-        if (!await confirmDialog({ title: t('Block every site for {company}?', { company: c.name }), body: t('Whitelist mode with an empty allowed list stops every page in this company.'), confirm: t('Block everything'), danger: true })) return;
-      }
+  function dnsInfo() {
+    const d = c.dns;
+    const refresh = h('button', { class: 'btn btn--quiet btn--sm', type: 'button', disabled: !d.configured, onclick: async (e) => {
+      const b = e.currentTarget;
+      b.disabled = true;
+      b.replaceChildren(icon('refresh', 14), t('Looking up…'));
       try {
-        await post('/api/companies/' + id + '/policy', { mode, whitelist: wl, blacklist: bl, rev: c.rev });
-        setDirty(false);
-        toast(t('Policy saved for {company}.', { company: c.name }));
+        const r = (await post('/api/companies/' + id + '/resolve')).dns;
+        toast(r.status === 'ok' ? t('{n} of {m} computers found in AD DNS.', { n: r.found, m: r.total }) : t('The domain controller did not answer.'), r.status === 'ok' ? 'ok' : 'error');
         await reload();
-      } catch (e) {
-        if (e.status === 409 && e.data.stale) return staleReload();
-        const f = e.fields || {};
-        toast(t(f.whitelist || f.blacklist || f.policy_mode || e.message), 'error');
-      }
+      } catch (err) { toast(errText(err), 'error'); b.disabled = false; }
+    } }, icon('refresh', 14), t('Refresh IPs'));
+    let text;
+    if (!d.configured) {
+      text = h('div', { class: 'note' }, icon('info', 16), h('div', null, t('Add the AD domain and the domain controller IP in Details — local IPs are looked up in the company’s own DNS.')));
+    } else if (d.status === 'unreachable') {
+      text = h('div', { class: 'note note--warn' }, icon('alert', 16), h('div', null,
+        t('The domain controller {dc} did not answer DNS queries from the fleet server. The server needs a route to this office (VPN). Until then you can type IPs in Details as “PC-01 10.1.2.3”.', { dc: c.dc_ip })));
+    } else if (d.status === 'ok') {
+      text = h('span', { class: 'ink-2' }, t('{n} of {m} IPs found in AD DNS ({dc})', { n: num(d.found), m: num(d.total), dc: c.dc_ip }), ' · ', when(d.checkedAt));
+    } else {
+      text = h('span', { class: 'ink-2' }, t('IPs have not been looked up yet.'));
     }
-
-    const reqPanel = c.requests.length ? h('section', { class: 'panel' },
-      h('div', { class: 'panel-head' }, h('h2', null, t('Requests from this company')), h('span', { class: 'badge badge--warn' }, num(c.requests.length))),
-      h('div', { class: 'table-wrap', style: { marginTop: '10px' } }, h('table', { class: 'table' },
-        h('tbody', null, c.requests.map((r) => h('tr', null,
-          h('td', null, h('b', { class: 'data' }, r.domain), h('span', { class: 'cell-sub truncate' }, r.url)),
-          h('td', { class: 'nowrap' }, tn(r.hits || 1, '{n} time', '{n} times')),
-          h('td', { class: 'nowrap' }, when(r.last_ts || r.ts)),
-          h('td', { class: 'actions' },
-            h('button', { class: 'btn btn--sm', type: 'button', onclick: () => resolve(r, 'approve') }, icon('check', 14), t('Allow')),
-            h('button', { class: 'btn btn--quiet btn--sm', type: 'button', onclick: () => resolve(r, 'reject') }, t('Reject')),
-            h('button', { class: 'btn btn--danger-quiet btn--sm', type: 'button', onclick: () => resolve(r, 'block') }, icon('ban', 14), t('Block'))))))))) : null;
-
-    async function resolve(r, action) {
-      if (dirty && !window.confirm(t('Discard unsaved policy changes?'))) return;
-      try {
-        const res = await post('/api/requests/resolve', { id: r.id, action, scope: 'company' });
-        const skip = res.results.find((x) => x.skipped === 'parent_blocked');
-        if (skip) {
-          toast(t('{d} is part of {parent}, which is on the blocked list. Remove {parent} from the blocked list first, or reject the request.', { d: skip.domain, parent: skip.parent }), 'error');
-          return;
-        }
-        setDirty(false);
-        toast(action === 'approve' ? t('{d} is allowed for {company}.', { d: r.domain, company: c.name }) : action === 'block' ? t('{d} is blocked for {company}.', { d: r.domain, company: c.name }) : t('Request rejected.'));
-        ctx.refreshBadges();
-        await reload();
-      } catch (e) { toast(errText(e), 'error'); }
-    }
-
-    return [
-      reqPanel,
-      h('section', { class: 'panel', style: reqPanel ? { marginTop: '20px' } : null },
-        h('div', { class: 'panel-head' }, h('h2', null, t('Mode for {company}', { company: c.name }))),
-        h('div', { class: 'panel-body' }, picker)),
-      h('div', { class: 'grid-2', style: { marginTop: '20px' } },
-        h('div', { class: 'grid-even', style: { gridTemplateColumns: '1fr 1fr' } }, allow.el, block.el),
-        h('section', { class: 'panel' },
-          h('div', { class: 'panel-head' }, h('h2', null, t('What these browsers get')),
-            h('p', null, t('Global lists plus this company’s lists, as sent to every browser in {company}.', { company: c.name }))),
-          h('div', { class: 'panel-body' }, preview))),
-      saveHost,
-    ];
+    replace(dnsLine, h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '14px' } }, text, refresh));
   }
 
-  /* ── AD computers tab ── */
-  function computersTab() {
-    if (!c.computers.length) {
-      return h('section', { class: 'panel' }, empty('monitor', t('No AD computer list'), t('Paste computer names in Details to measure how many PCs run the extension.'),
-        h('button', { class: 'btn btn--quiet', onclick: () => switchTab('details') }, t('Open details'))));
-    }
-    const grid = h('div', { class: 'pc-grid' });
-    const paint = (q) => {
-      const list = c.computers.filter((n) => !q || n.toLowerCase().includes(q.toLowerCase()));
-      replace(grid, list.length ? list.map((n) => h('div', { class: 'pc', title: n }, icon('monitor', 14), n)) : h('p', { class: 'muted' }, t('Nothing matches “{q}”.', { q })));
-    };
-    paint('');
-    return h('section', { class: 'panel' },
-      h('div', { class: 'panel-head' }, h('h2', null, tn(c.computers.length, '{n} computer in Active Directory', '{n} computers in Active Directory')),
-        h('p', null, t('Browsers cannot report their computer name, so this list is used for coverage only.'))),
-      h('div', { class: 'panel-body' }, h('div', { class: 'toolbar' }, searchBox('', paint, t('Find a computer'))), grid));
+  const columns = [
+    { key: 'n', label: '#', class: 'num', render: (p, i) => h('span', { class: 'muted num' }, i + 1) },
+    { key: 'name', label: t('Computer'), sort: (p) => p.name.toLowerCase(),
+      render: (p) => [h('b', { class: 'data' }, p.name), !p.listed ? h('span', { class: 'badge badge--warn', style: { marginLeft: '8px' } }, t('Not in the AD list')) : null] },
+    { key: 'ip', label: t('Local IP'), sort: (p) => (p.ip ? p.ip.split('.').map((x) => x.padStart(3, '0')).join('.') : '~'),
+      render: (p) => (p.ip ? [h('span', { class: 'data' }, p.ip), p.ipSource === 'manual' ? h('span', { class: 'cell-sub' }, t('typed in')) : null] : h('span', { class: 'muted' }, '—')) },
+    { key: 'status', label: t('Status'), sort: (p) => ({ online: 0, offline: 1, none: 2 }[p.status]), render: (p) => STATUS[p.status]() },
+    { key: 'version', label: t('Version'), sort: (p) => p.version || '', render: (p) => (p.version ? h('span', { class: 'ver' }, p.version) : h('span', { class: 'muted' }, '—')) },
+    { key: 'seen', label: t('Last check-in'), sort: (p) => p.lastSeen || '', defaultDir: 'desc', render: (p) => (p.lastSeen ? when(p.lastSeen) : h('span', { class: 'muted' }, '—')) },
+  ];
+
+  function paintComputers() {
+    dnsInfo();
+    const list = c.computerList;
+    const counts = {};
+    for (const k of Object.keys(FILTERS)) counts[k] = list.filter(FILTERS[k]).length;
+    replace(pcToolbar,
+      searchBox(pcState.q, (q) => { pcState.q = q; paintTable(); }, t('Find a computer or IP')),
+      chips([
+        { value: 'all', label: t('All'), count: counts.all },
+        { value: 'online', label: t('Online'), count: counts.online },
+        { value: 'offline', label: t('Offline'), count: counts.offline },
+        { value: 'none', label: t('No extension'), count: counts.none },
+        { value: 'noip', label: t('No IP'), count: counts.noip },
+      ], pcState.filter, (f) => { pcState.filter = f; paintTable(); }, { label: t('Filter computers') }));
+    replace(tabHost, dnsLine, pcToolbar, pcHost,
+      c.unnamedBrowsers ? h('div', { class: 'note', style: { marginTop: '14px' } }, icon('info', 16), h('div', null,
+        tn(c.unnamedBrowsers, '{n} browser in this company does not report its computer name yet. Statuses appear after extension 2.4.0 and the computerName policy are installed (see DEPLOYMENT.md).', '{n} browsers in this company do not report their computer name yet. Statuses appear after extension 2.4.0 and the computerName policy are installed (see DEPLOYMENT.md).'))) : null);
+    paintTable();
   }
 
-  /* ── Details tab ── */
+  function paintTable() {
+    const q = pcState.q.trim().toLowerCase();
+    let rows = c.computerList.filter(FILTERS[pcState.filter] || FILTERS.all);
+    if (q) rows = rows.filter((p) => p.name.toLowerCase().includes(q) || (p.ip || '').includes(q));
+    rows = sortRows(rows, columns, pcState.sort);
+    if (!c.computerList.length) {
+      replace(pcHost, h('section', { class: 'panel' }, empty('monitor', t('No AD computer list'), t('Paste the computer names in Details, one per line. An IP after the name is optional.'),
+        h('button', { class: 'btn btn--quiet', onclick: () => switchTab('details') }, t('Open details')))));
+      return;
+    }
+    if (!rows.length) { replace(pcHost, h('section', { class: 'panel' }, empty('search', t('Nothing matches “{q}”.', { q: pcState.q || pcState.filter }), null))); return; }
+    replace(pcHost, h('section', { class: 'panel panel--flush' }, h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+      sortableHead(columns, pcState.sort, (st) => { pcState.sort = st; paintTable(); }),
+      h('tbody', null, rows.map((p, i) => h('tr', null, columns.map((col) => h('td', { class: col.class || (col.key === 'seen' ? 'nowrap' : null) }, col.render(p, i))))))))));
+  }
+
+  /* ── Details ── */
   function detailsTab() {
-    const fields = companyFields(c);
+    const fields = companyFields({ ...c, computers: c.computers.map((n) => (c.manualIps[n.toLowerCase()] ? n + ' ' + c.manualIps[n.toLowerCase()] : n)) });
     const inputs = {};
     const errs = {};
     const form = h('form', { class: 'form-grid', onsubmit: async (e) => {
@@ -353,9 +255,8 @@ export async function render(page, params, ctx) {
 
   return {
     refresh: async () => {
-      if (dirty || tab !== 'devices') return;
-      try { await fetchAll(); replace(headHost, header()); paintTabs(); paintTab(); } catch (_) { /* keep */ }
+      if (tab !== 'computers' || (document.activeElement && document.activeElement.closest('.toolbar'))) return;
+      try { await fetchAll(); replace(headHost, header()); paintTabs(); paintComputers(); } catch (_) { /* keep */ }
     },
-    destroy: () => { window.onbeforeunload = null; },
   };
 }

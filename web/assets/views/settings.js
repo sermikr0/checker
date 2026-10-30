@@ -1,7 +1,7 @@
 import { h, icon, replace } from '../dom.js';
 import { api, post } from '../api.js';
 import { t, tn, getLang } from '../i18n.js';
-import { seg, toast, errText, confirmDialog } from '../ui.js';
+import { seg, toast, errText, confirmDialog, copyBtn } from '../ui.js';
 
 export async function render(page, params, ctx) {
   document.title = t('Settings') + ' — Fleet';
@@ -61,6 +61,7 @@ export async function render(page, params, ctx) {
               ], ctx.themePref(), (v) => ctx.applyTheme(v), { label: t('Theme') })),
             h('div', { class: 'field' }, h('span', { class: 'field-label' }, t('Language')),
               seg([{ value: 'uz', label: 'O‘zbekcha' }, { value: 'en', label: 'English' }], getLang(), (v) => ctx.setLang(v), { label: t('Language') })))),
+        rdpPanel(),
         h('section', { class: 'panel' },
           h('div', { class: 'panel-head' }, h('h2', null, t('Sessions'))),
           h('div', { class: 'panel-body' }, sessionsLine,
@@ -77,3 +78,26 @@ export async function render(page, params, ctx) {
             h('div', null, h('dt', null, t('Offline after')), h('dd', null, t('{n} s', { n: me.onlineSec })))))))));
   return {};
 }
+
+/* Remote desktop to a company's domain controller: the Companies page opens
+ * fleet-rdp:// links, which a small helper on this computer hands to xfreerdp. */
+function rdpPanel() {
+  let user = '';
+  try { user = localStorage.getItem('fleet.rdpUser') || ''; } catch (_) { /* ignore */ }
+  const input = h('input', { id: 's-rdp-user', class: 'input', value: user, placeholder: 'Administrator', autocomplete: 'off', spellcheck: 'false' });
+  input.addEventListener('change', () => {
+    try { localStorage.setItem('fleet.rdpUser', input.value.trim()); } catch (_) { /* ignore */ }
+    toast(t('Saved for this browser.'));
+  });
+  const install = 'curl -fsSL https://raw.githubusercontent.com/sermikr0/checker/main/tools/fleet-rdp/install.sh | bash';
+  return h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, t('Remote desktop')),
+      h('p', null, t('The RDP button next to each company opens xfreerdp to its domain controller with dynamic resolution.'))),
+    h('div', { class: 'panel-body', style: { display: 'grid', gap: '14px' } },
+      h('div', { class: 'field' }, h('label', { for: 's-rdp-user' }, t('RDP user name')), input,
+        h('div', { class: 'field-hint' }, t('Sent with the AD domain of the company. The password is typed in the terminal that opens.'))),
+      h('div', { class: 'field' }, h('span', { class: 'field-label' }, t('One-time setup on this Linux computer')),
+        h('pre', { class: 'code' }, install, copyBtn(install)),
+        h('div', { class: 'field-hint' }, t('Needs xfreerdp (sudo apt install freerdp2-x11 or freerdp3-x11). The helper only connects to private addresses and asks before connecting.')))));
+}
+

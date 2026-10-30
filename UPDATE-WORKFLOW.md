@@ -12,8 +12,7 @@ that the package carries the fleet's extension ID before publishing it.
 ## One-time: force-install on each computer
 
 Self-hosted updates only work for policy-installed extensions ("Load unpacked"
-never updates). The dashboard's **Updates** page shows ready-to-copy commands
-with the right ID and URL:
+never updates):
 
 * **Windows** (admin, then restart Chrome):
   ```
@@ -25,6 +24,9 @@ with the right ID and URL:
   ```
 * **Group Policy / Google Admin console** — force-install the ID above with the update URL above.
 
+For per-computer statuses (2.4.0+) also set the `computerName` extension
+policy — see DEPLOYMENT.md → *Computer names and statuses*.
+
 ## Every release
 
 1. Change the code in `extension/`.
@@ -35,7 +37,7 @@ with the right ID and URL:
    ```
 4. Dashboard → **Updates** → drop the `.crx` on the upload area.
 5. Browsers pick it up within a few hours (or at once from `chrome://extensions` → **Update**).
-   The Updates page shows how many browsers already run the new version.
+   The Overview page shows how many browsers already run the new version.
 
 Publishing a version that is not newer than the current one asks for
 confirmation — Chrome never downgrades, so it would have no effect on

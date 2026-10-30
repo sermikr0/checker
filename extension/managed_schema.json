@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "computerName": {
+      "title": "Computer name",
+      "description": "Windows computer name of this PC, set by IT policy (for example with %COMPUTERNAME%). Shown in the fleet dashboard next to the AD computer list.",
+      "type": "string"
+    }
+  }
+}

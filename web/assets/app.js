@@ -6,7 +6,6 @@ import { toast, plate } from './ui.js';
 import * as overview from './views/overview.js';
 import * as companies from './views/companies.js';
 import * as company from './views/company.js';
-import * as devices from './views/devices.js';
 import * as policy from './views/policy.js';
 import * as requests from './views/requests.js';
 import * as updates from './views/updates.js';
@@ -17,7 +16,6 @@ import * as login from './views/login.js';
 const NAV = [
   { path: 'overview', icon: 'overview', label: () => t('Overview') },
   { path: 'companies', icon: 'building', label: () => t('Companies'), badge: 'companies' },
-  { path: 'devices', icon: 'monitor', label: () => t('Devices'), badge: 'devices' },
   { path: 'policy', icon: 'policy', label: () => t('Global policy') },
   { path: 'requests', icon: 'inbox', label: () => t('Access requests'), badge: 'requests', alert: true },
   null,
@@ -26,7 +24,7 @@ const NAV = [
   { path: 'settings', icon: 'sliders', label: () => t('Settings') },
 ];
 
-const VIEWS = { overview, companies, devices, policy, requests, updates, activity, settings };
+const VIEWS = { overview, companies, policy, requests, updates, activity, settings };
 
 const root = document.getElementById('root');
 const ctx = {
@@ -120,7 +118,7 @@ function paintBadges() {
 async function refreshBadges() {
   try {
     const o = await api('/api/overview');
-    ctx.badges = { requests: o.requests.pending, devices: o.devices.total, companies: o.companies.length };
+    ctx.badges = { requests: o.requests.pending, companies: o.companies.length };
     ctx.overview = o;
     paintBadges();
   } catch (_) { /* handled globally */ }

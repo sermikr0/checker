@@ -401,11 +401,12 @@ async function loadSettings() {
 // show it plainly in Settings (server, device id, last check-in).
 async function showManagedNotice() {
   try {
-    const d = await chrome.storage.local.get(['managedServer', 'managedCompany', 'managedLastSeen', 'settings']);
+    const d = await chrome.storage.local.get(['managedServer', 'managedCompany', 'managedComputer', 'managedLastSeen', 'settings']);
     if (!d.managedServer) return;
     const mode = (d.settings && d.settings.enforceMode) || 'off';
     $('managed-server').textContent = d.managedServer.replace(/^https?:\/\//, '');
     $('managed-company').textContent = d.managedCompany || 'Not assigned yet';
+    $('managed-computer').textContent = d.managedComputer || 'Not set by policy';
     const plate = el('span', 'mode-plate ' + mode, MODE_LABEL[mode] || mode);
     $('managed-mode').replaceChildren(plate);
     $('managed-notice').classList.remove('hidden');

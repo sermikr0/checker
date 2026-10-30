@@ -27,7 +27,8 @@ const memCache = new Map();
  *
  * IMPORTANT — what this channel is NOT:
  *   • It sends NO browsing history and NO page contents — only a random device
- *     id, the extension version and the user-agent. The server additionally
+ *     id, the extension version, the user-agent and, when IT sets it by policy,
+ *     the Windows computer name. The server additionally
  *     sees the source IP of the request (unavoidable for any network call).
  *   • It NEVER downloads or executes code from the server. The config it pulls
  *     is strictly data and is type-checked before use. Extension *code* updates
@@ -167,9 +168,23 @@ async function applyStoredRules() {
   } catch (_) { /* ignore */ }
 }
 
+/** Computer name set by IT through Chrome's extension policy (managed storage). */
+async function managedComputerName() {
+  try {
+    if (!chrome.storage.managed) return '';
+    const d = await chrome.storage.managed.get('computerName');
+    const name = String((d && d.computerName) || '').trim();
+    return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name) ? name : '';
+  } catch (_) {
+    return '';   // no policy on this computer
+  }
+}
+
 async function reportTo(path, extra) {
   const deviceId = await getDeviceId();
+  const computerName = await managedComputerName();
   const payload = { deviceId, version: USC.VERSION, userAgent: navigator.userAgent, ...extra };
+  if (computerName) payload.computerName = computerName;
   try {
     const resp = await fetch(MGMT.server + path, {
       method: 'POST',
@@ -182,7 +197,7 @@ async function reportTo(path, extra) {
     if (!resp.ok) return;
     const data = await resp.json();
     const company = data && data.policy && typeof data.policy.company === 'string' ? data.policy.company.slice(0, 120) : '';
-    await chrome.storage.local.set({ managedLastSeen: Date.now(), managedServer: MGMT.server, managedCompany: company });
+    await chrome.storage.local.set({ managedLastSeen: Date.now(), managedServer: MGMT.server, managedCompany: company, managedComputer: computerName });
     if (data && data.config) await applyManagedConfig(data.config);
     const mins = Number(data && data.heartbeatSec) > 0 ? Math.max(1, Math.round(data.heartbeatSec / 60)) : MGMT.defaultHeartbeatMin;
     try { chrome.alarms.create(MGMT.heartbeatAlarm, { periodInMinutes: mins }); } catch (_) { /* ignore */ }
